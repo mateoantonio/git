@@ -2,6 +2,9 @@
 
 test_description='git p4 label tests'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./lib-git-p4.sh
 
 test_expect_success 'start p4d' '
@@ -133,7 +136,7 @@ test_expect_success 'export git tags to p4' '
 		p4 labels ... | grep LIGHTWEIGHT_TAG &&
 		p4 label -o GIT_TAG_1 | grep "tag created in git:xyzzy" &&
 		p4 sync ...@GIT_TAG_1 &&
-		! test -f main/f10
+		! test -f main/f10 &&
 		p4 sync ...@GIT_TAG_2 &&
 		test -f main/f10
 	)
@@ -185,13 +188,13 @@ test_expect_success 'tag that cannot be exported' '
 		git add main/f12 &&
 		git commit -m "adding f12" &&
 		git tag -m "tag on a_branch" GIT_TAG_ON_A_BRANCH &&
-		git checkout master &&
+		git checkout main &&
 		git p4 submit --export-labels
 	) &&
 	(
 		cd "$cli" &&
 		p4 sync ... &&
-		!(p4 labels | grep GIT_TAG_ON_A_BRANCH)
+		! p4 labels | grep GIT_TAG_ON_A_BRANCH
 	)
 '
 
@@ -214,9 +217,49 @@ test_expect_success 'use git config to enable import/export of tags' '
 	)
 '
 
+p4_head_revision() {
+	p4 changes -m 1 "$@" | awk '{print $2}'
+}
 
-test_expect_success 'kill p4d' '
-	kill_p4d
+# Importing a label that references a P4 commit that
+# has not been seen. The presence of a label on a commit
+# we haven't seen should not cause git-p4 to fail. It should
+# merely skip that label, and still import other labels.
+test_expect_success 'importing labels with missing revisions' '
+	test_when_finished cleanup_git &&
+	(
+		rm -fr "$cli" "$git" &&
+		mkdir "$cli" &&
+		P4CLIENT=missing-revision &&
+		client_view "//depot/missing-revision/... //missing-revision/..." &&
+		cd "$cli" &&
+		>f1 && p4 add f1 && p4 submit -d "start" &&
+
+		p4 tag -l TAG_S0 ... &&
+
+		>f2 && p4 add f2 && p4 submit -d "second" &&
+
+		startrev=$(p4_head_revision //depot/missing-revision/...) &&
+
+		>f3 && p4 add f3 && p4 submit -d "third" &&
+
+		p4 edit f2 && date >f2 && p4 submit -d "change" f2 &&
+
+		endrev=$(p4_head_revision //depot/missing-revision/...) &&
+
+		p4 tag -l TAG_S1 ... &&
+
+		# we should skip TAG_S0 since it is before our startpoint,
+		# but pick up TAG_S1.
+
+		git p4 clone --dest="$git" --import-labels -v \
+			//depot/missing-revision/...@$startrev,$endrev &&
+		(
+			cd "$git" &&
+			git rev-parse TAG_S1 &&
+			! git rev-parse TAG_S0
+		)
+	)
 '
 
 test_done

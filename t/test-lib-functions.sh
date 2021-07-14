@@ -32,16 +32,14 @@ test_set_editor () {
 	export EDITOR
 }
 
-test_set_index_version () {
-    GIT_INDEX_VERSION="$1"
-    export GIT_INDEX_VERSION
-}
-
 test_decode_color () {
 	awk '
 		function name(n) {
 			if (n == 0) return "RESET";
 			if (n == 1) return "BOLD";
+			if (n == 2) return "FAINT";
+			if (n == 3) return "ITALIC";
+			if (n == 7) return "REVERSE";
 			if (n == 30) return "BLACK";
 			if (n == 31) return "RED";
 			if (n == 32) return "GREEN";
@@ -79,6 +77,10 @@ test_decode_color () {
 			print
 		}
 	'
+}
+
+lf_to_nul () {
+	perl -pe 'y/\012/\000/'
 }
 
 nul_to_q () {
@@ -132,20 +134,61 @@ test_tick () {
 	export GIT_COMMITTER_DATE GIT_AUTHOR_DATE
 }
 
-# Stop execution and start a shell. This is useful for debugging tests and
-# only makes sense together with "-v".
+# Stop execution and start a shell. This is useful for debugging tests.
 #
 # Be sure to remove all invocations of this command before submitting.
 
 test_pause () {
-	if test "$verbose" = t; then
-		"$SHELL_PATH" <&6 >&3 2>&4
-	else
-		error >&5 "test_pause requires --verbose"
-	fi
+	"$SHELL_PATH" <&6 >&5 2>&7
 }
 
-# Call test_commit with the arguments "<message> [<file> [<contents> [<tag>]]]"
+# Wrap git with a debugger. Adding this to a command can make it easier
+# to understand what is going on in a failing test.
+#
+# Examples:
+#     debug git checkout master
+#     debug --debugger=nemiver git $ARGS
+#     debug -d "valgrind --tool=memcheck --track-origins=yes" git $ARGS
+debug () {
+	case "$1" in
+	-d)
+		GIT_DEBUGGER="$2" &&
+		shift 2
+		;;
+	--debugger=*)
+		GIT_DEBUGGER="${1#*=}" &&
+		shift 1
+		;;
+	*)
+		GIT_DEBUGGER=1
+		;;
+	esac &&
+	GIT_DEBUGGER="${GIT_DEBUGGER}" "$@" <&6 >&5 2>&7
+}
+
+# Usage: test_commit [options] <message> [<file> [<contents> [<tag>]]]
+#   -C <dir>:
+#	Run all git commands in directory <dir>
+#   --notick
+#	Do not call test_tick before making a commit
+#   --append
+#	Use ">>" instead of ">" when writing "<contents>" to "<file>"
+#   --printf
+#       Use "printf" instead of "echo" when writing "<contents>" to
+#       "<file>", use this to write escape sequences such as "\0", a
+#       trailing "\n" won't be added automatically. This option
+#       supports nothing but the FORMAT of printf(1), i.e. no custom
+#       ARGUMENT(s).
+#   --signoff
+#	Invoke "git commit" with --signoff
+#   --author <author>
+#	Invoke "git commit" with --author <author>
+#   --no-tag
+#	Do not tag the resulting commit
+#   --annotate
+#	Create an annotated tag with "--annotate -m <message>". Calls
+#	test_tick between making the commit and tag, unless --notick
+#	is given.
 #
 # This will commit a file with the given contents and the given commit
 # message, and tag the resulting commit with the given tag name.
@@ -154,15 +197,46 @@ test_pause () {
 
 test_commit () {
 	notick= &&
+	echo=echo &&
+	append= &&
+	author= &&
 	signoff= &&
+	indir= &&
+	tag=light &&
 	while test $# != 0
 	do
 		case "$1" in
 		--notick)
 			notick=yes
 			;;
+		--printf)
+			echo=printf
+			;;
+		--append)
+			append=yes
+			;;
+		--author)
+			author="$2"
+			shift
+			;;
 		--signoff)
 			signoff="$1"
+			;;
+		--date)
+			notick=yes
+			GIT_COMMITTER_DATE="$2"
+			GIT_AUTHOR_DATE="$2"
+			shift
+			;;
+		-C)
+			indir="$2"
+			shift
+			;;
+		--no-tag)
+			tag=none
+			;;
+		--annotate)
+			tag=annotate
 			;;
 		*)
 			break
@@ -170,24 +244,170 @@ test_commit () {
 		esac
 		shift
 	done &&
+	indir=${indir:+"$indir"/} &&
 	file=${2:-"$1.t"} &&
-	echo "${3-$1}" > "$file" &&
-	git add "$file" &&
+	if test -n "$append"
+	then
+		$echo "${3-$1}" >>"$indir$file"
+	else
+		$echo "${3-$1}" >"$indir$file"
+	fi &&
+	git ${indir:+ -C "$indir"} add "$file" &&
 	if test -z "$notick"
 	then
 		test_tick
 	fi &&
-	git commit $signoff -m "$1" &&
-	git tag "${4:-$1}"
+	git ${indir:+ -C "$indir"} commit \
+	    ${author:+ --author "$author"} \
+	    $signoff -m "$1" &&
+	case "$tag" in
+	none)
+		;;
+	light)
+		git ${indir:+ -C "$indir"} tag "${4:-$1}"
+		;;
+	annotate)
+		if test -z "$notick"
+		then
+			test_tick
+		fi &&
+		git ${indir:+ -C "$indir"} tag -a -m "$1" "${4:-$1}"
+		;;
+	esac
 }
 
 # Call test_merge with the arguments "<message> <commit>", where <commit>
 # can be a tag pointing to the commit-to-merge.
 
 test_merge () {
+	label="$1" &&
+	shift &&
 	test_tick &&
-	git merge -m "$1" "$2" &&
-	git tag "$1"
+	git merge -m "$label" "$@" &&
+	git tag "$label"
+}
+
+# Efficiently create <nr> commits, each with a unique number (from 1 to <nr>
+# by default) in the commit message.
+#
+# Usage: test_commit_bulk [options] <nr>
+#   -C <dir>:
+#	Run all git commands in directory <dir>
+#   --ref=<n>:
+#	ref on which to create commits (default: HEAD)
+#   --start=<n>:
+#	number commit messages from <n> (default: 1)
+#   --message=<msg>:
+#	use <msg> as the commit mesasge (default: "commit %s")
+#   --filename=<fn>:
+#	modify <fn> in each commit (default: %s.t)
+#   --contents=<string>:
+#	place <string> in each file (default: "content %s")
+#   --id=<string>:
+#	shorthand to use <string> and %s in message, filename, and contents
+#
+# The message, filename, and contents strings are evaluated by printf, with the
+# first "%s" replaced by the current commit number. So you can do:
+#
+#   test_commit_bulk --filename=file --contents="modification %s"
+#
+# to have every commit touch the same file, but with unique content.
+#
+test_commit_bulk () {
+	tmpfile=.bulk-commit.input
+	indir=.
+	ref=HEAD
+	n=1
+	message='commit %s'
+	filename='%s.t'
+	contents='content %s'
+	while test $# -gt 0
+	do
+		case "$1" in
+		-C)
+			indir=$2
+			shift
+			;;
+		--ref=*)
+			ref=${1#--*=}
+			;;
+		--start=*)
+			n=${1#--*=}
+			;;
+		--message=*)
+			message=${1#--*=}
+			;;
+		--filename=*)
+			filename=${1#--*=}
+			;;
+		--contents=*)
+			contents=${1#--*=}
+			;;
+		--id=*)
+			message="${1#--*=} %s"
+			filename="${1#--*=}-%s.t"
+			contents="${1#--*=} %s"
+			;;
+		-*)
+			BUG "invalid test_commit_bulk option: $1"
+			;;
+		*)
+			break
+			;;
+		esac
+		shift
+	done
+	total=$1
+
+	add_from=
+	if git -C "$indir" rev-parse --quiet --verify "$ref"
+	then
+		add_from=t
+	fi
+
+	while test "$total" -gt 0
+	do
+		test_tick &&
+		echo "commit $ref"
+		printf 'author %s <%s> %s\n' \
+			"$GIT_AUTHOR_NAME" \
+			"$GIT_AUTHOR_EMAIL" \
+			"$GIT_AUTHOR_DATE"
+		printf 'committer %s <%s> %s\n' \
+			"$GIT_COMMITTER_NAME" \
+			"$GIT_COMMITTER_EMAIL" \
+			"$GIT_COMMITTER_DATE"
+		echo "data <<EOF"
+		printf "$message\n" $n
+		echo "EOF"
+		if test -n "$add_from"
+		then
+			echo "from $ref^0"
+			add_from=
+		fi
+		printf "M 644 inline $filename\n" $n
+		echo "data <<EOF"
+		printf "$contents\n" $n
+		echo "EOF"
+		echo
+		n=$((n + 1))
+		total=$((total - 1))
+	done >"$tmpfile"
+
+	git -C "$indir" \
+	    -c fastimport.unpacklimit=0 \
+	    fast-import <"$tmpfile" || return 1
+
+	# This will be left in place on failure, which may aid debugging.
+	rm -f "$tmpfile"
+
+	# If we updated HEAD, then be nice and update the index and working
+	# tree, too.
+	if test "$ref" = "HEAD"
+	then
+		git -C "$indir" checkout -f HEAD || return 1
+	fi
+
 }
 
 # This function helps systems where core.filemode=false is set.
@@ -199,9 +419,26 @@ test_chmod () {
 	git update-index --add "--chmod=$@"
 }
 
+# Get the modebits from a file or directory, ignoring the setgid bit (g+s).
+# This bit is inherited by subdirectories at their creation. So we remove it
+# from the returning string to prevent callers from having to worry about the
+# state of the bit in the test directory.
+#
+test_modebits () {
+	ls -ld "$1" | sed -e 's|^\(..........\).*|\1|' \
+			  -e 's|^\(......\)S|\1-|' -e 's|^\(......\)s|\1x|'
+}
+
 # Unset a configuration variable, but don't fail if it doesn't exist.
 test_unconfig () {
-	git config --unset-all "$@"
+	config_dir=
+	if test "$1" = -C
+	then
+		shift
+		config_dir=$1
+		shift
+	fi
+	git ${config_dir:+-C "$config_dir"} config --unset-all "$@"
 	config_status=$?
 	case "$config_status" in
 	5) # ok, nothing to unset
@@ -213,8 +450,15 @@ test_unconfig () {
 
 # Set git config, automatically unsetting it after the test is over.
 test_config () {
-	test_when_finished "test_unconfig '$1'" &&
-	git config "$@"
+	config_dir=
+	if test "$1" = -C
+	then
+		shift
+		config_dir=$1
+		shift
+	fi
+	test_when_finished "test_unconfig ${config_dir:+-C '$config_dir'} '$1'" &&
+	git ${config_dir:+-C "$config_dir"} config "$@"
 }
 
 test_config_global () {
@@ -236,13 +480,45 @@ write_script () {
 # - Explicitly using test_have_prereq.
 #
 # - Implicitly by specifying the prerequisite tag in the calls to
-#   test_expect_{success,failure,code}.
+#   test_expect_{success,failure} and test_external{,_without_stderr}.
 #
 # The single parameter is the prerequisite tag (a simple word, in all
 # capital letters by convention).
 
+test_unset_prereq () {
+	! test_have_prereq "$1" ||
+	satisfied_prereq="${satisfied_prereq% $1 *} ${satisfied_prereq#* $1 }"
+}
+
 test_set_prereq () {
-	satisfied_prereq="$satisfied_prereq$1 "
+	if test -n "$GIT_TEST_FAIL_PREREQS_INTERNAL"
+	then
+		case "$1" in
+		# The "!" case is handled below with
+		# test_unset_prereq()
+		!*)
+			;;
+		# (Temporary?) whitelist of things we can't easily
+		# pretend not to support
+		SYMLINKS)
+			;;
+		# Inspecting whether GIT_TEST_FAIL_PREREQS is on
+		# should be unaffected.
+		FAIL_PREREQS)
+			;;
+		*)
+			return
+		esac
+	fi
+
+	case "$1" in
+	!*)
+		test_unset_prereq "${1#!}"
+		;;
+	*)
+		satisfied_prereq="$satisfied_prereq$1 "
+		;;
+	esac
 }
 satisfied_prereq=" "
 lazily_testable_prereq= lazily_tested_prereq=
@@ -255,15 +531,15 @@ test_lazy_prereq () {
 
 test_run_lazy_prereq_ () {
 	script='
-mkdir -p "$TRASH_DIRECTORY/prereq-test-dir" &&
+mkdir -p "$TRASH_DIRECTORY/prereq-test-dir-'"$1"'" &&
 (
-	cd "$TRASH_DIRECTORY/prereq-test-dir" &&'"$2"'
+	cd "$TRASH_DIRECTORY/prereq-test-dir-'"$1"'" &&'"$2"'
 )'
 	say >&3 "checking prerequisite: $1"
 	say >&3 "$script"
 	test_eval_ "$script"
 	eval_ret=$?
-	rm -rf "$TRASH_DIRECTORY/prereq-test-dir"
+	rm -rf "$TRASH_DIRECTORY/prereq-test-dir-$1"
 	if test "$eval_ret" = 0; then
 		say >&3 "prerequisite $1 ok"
 	else
@@ -348,15 +624,22 @@ test_declared_prereq () {
 	return 1
 }
 
+test_verify_prereq () {
+	test -z "$test_prereq" ||
+	expr >/dev/null "$test_prereq" : '[A-Z0-9_,!]*$' ||
+	BUG "'$test_prereq' does not look like a prereq"
+}
+
 test_expect_failure () {
 	test_start_
 	test "$#" = 3 && { test_prereq=$1; shift; } || test_prereq=
 	test "$#" = 2 ||
-	error "bug in the test script: not 2 or 3 parameters to test-expect-failure"
+	BUG "not 2 or 3 parameters to test-expect-failure"
+	test_verify_prereq
 	export test_prereq
 	if ! test_skip "$@"
 	then
-		say >&3 "checking known breakage: $2"
+		say >&3 "checking known breakage of $TEST_NUMBER.$test_count '$1': $2"
 		if test_run_ "$2" expecting_failure
 		then
 			test_known_broken_ok_ "$1"
@@ -371,11 +654,12 @@ test_expect_success () {
 	test_start_
 	test "$#" = 3 && { test_prereq=$1; shift; } || test_prereq=
 	test "$#" = 2 ||
-	error "bug in the test script: not 2 or 3 parameters to test-expect-success"
+	BUG "not 2 or 3 parameters to test-expect-success"
+	test_verify_prereq
 	export test_prereq
 	if ! test_skip "$@"
 	then
-		say >&3 "expecting success: $2"
+		say >&3 "expecting success of $TEST_NUMBER.$test_count '$1': $2"
 		if test_run_ "$2"
 		then
 			test_ok_ "$1"
@@ -397,9 +681,10 @@ test_expect_success () {
 test_external () {
 	test "$#" = 4 && { test_prereq=$1; shift; } || test_prereq=
 	test "$#" = 3 ||
-	error >&5 "bug in the test script: not 3 or 4 parameters to test_external"
+	BUG "not 3 or 4 parameters to test_external"
 	descr="$1"
 	shift
+	test_verify_prereq
 	export test_prereq
 	if ! test_skip "$descr" "$@"
 	then
@@ -413,7 +698,7 @@ test_external () {
 		# test_run_, but keep its stdout on our stdout even in
 		# non-verbose mode.
 		"$@" 2>&4
-		if [ "$?" = 0 ]
+		if test "$?" = 0
 		then
 			if test $test_external_has_tap -eq 0; then
 				test_ok_ "$descr"
@@ -440,11 +725,12 @@ test_external_without_stderr () {
 	tmp=${TMPDIR:-/tmp}
 	stderr="$tmp/git-external-stderr.$$.tmp"
 	test_external "$@" 4> "$stderr"
-	[ -f "$stderr" ] || error "Internal error: $stderr disappeared."
+	test -f "$stderr" || error "Internal error: $stderr disappeared."
 	descr="no stderr: $1"
 	shift
 	say >&3 "# expecting no stderr from previous command"
-	if [ ! -s "$stderr" ]; then
+	if test ! -s "$stderr"
+	then
 		rm "$stderr"
 
 		if test $test_external_has_tap -eq 0; then
@@ -454,8 +740,9 @@ test_external_without_stderr () {
 			test_success=$(($test_success + 1))
 		fi
 	else
-		if [ "$verbose" = t ]; then
-			output=`echo; echo "# Stderr is:"; cat "$stderr"`
+		if test "$verbose" = t
+		then
+			output=$(echo; echo "# Stderr is:"; cat "$stderr")
 		else
 			output=
 		fi
@@ -471,30 +758,64 @@ test_external_without_stderr () {
 }
 
 # debugging-friendly alternatives to "test [-f|-d|-e]"
-# The commands test the existence or non-existence of $1. $2 can be
-# given to provide a more precise diagnosis.
+# The commands test the existence or non-existence of $1
 test_path_is_file () {
-	if ! [ -f "$1" ]
+	test "$#" -ne 1 && BUG "1 param"
+	if ! test -f "$1"
 	then
-		echo "File $1 doesn't exist. $*"
+		echo "File $1 doesn't exist"
 		false
 	fi
 }
 
 test_path_is_dir () {
-	if ! [ -d "$1" ]
+	test "$#" -ne 1 && BUG "1 param"
+	if ! test -d "$1"
 	then
-		echo "Directory $1 doesn't exist. $*"
+		echo "Directory $1 doesn't exist"
+		false
+	fi
+}
+
+test_path_exists () {
+	test "$#" -ne 1 && BUG "1 param"
+	if ! test -e "$1"
+	then
+		echo "Path $1 doesn't exist"
+		false
+	fi
+}
+
+# Check if the directory exists and is empty as expected, barf otherwise.
+test_dir_is_empty () {
+	test "$#" -ne 1 && BUG "1 param"
+	test_path_is_dir "$1" &&
+	if test -n "$(ls -a1 "$1" | egrep -v '^\.\.?$')"
+	then
+		echo "Directory '$1' is not empty, it contains:"
+		ls -la "$1"
+		return 1
+	fi
+}
+
+# Check if the file exists and has a size greater than zero
+test_file_not_empty () {
+	test "$#" = 2 && BUG "2 param"
+	if ! test -s "$1"
+	then
+		echo "'$1' is not a non-empty file."
 		false
 	fi
 }
 
 test_path_is_missing () {
-	if [ -e "$1" ]
+	test "$#" -ne 1 && BUG "1 param"
+	if test -e "$1"
 	then
 		echo "Path exists:"
 		ls -ld "$1"
-		if [ $# -ge 1 ]; then
+		if test $# -ge 1
+		then
 			echo "$*"
 		fi
 		false
@@ -515,13 +836,64 @@ test_path_is_missing () {
 test_line_count () {
 	if test $# != 3
 	then
-		error "bug in the test script: not 3 parameters to test_line_count"
+		BUG "not 3 parameters to test_line_count"
 	elif ! test $(wc -l <"$3") "$1" "$2"
 	then
 		echo "test_line_count: line count for $3 !$1 $2"
 		cat "$3"
 		return 1
 	fi
+}
+
+test_file_size () {
+	test "$#" -ne 1 && BUG "1 param"
+	test-tool path-utils file-size "$1"
+}
+
+# Returns success if a comma separated string of keywords ($1) contains a
+# given keyword ($2).
+# Examples:
+# `list_contains "foo,bar" bar` returns 0
+# `list_contains "foo" bar` returns 1
+
+list_contains () {
+	case ",$1," in
+	*,$2,*)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# Returns success if the arguments indicate that a command should be
+# accepted by test_must_fail(). If the command is run with env, the env
+# and its corresponding variable settings will be stripped before we
+# test the command being run.
+test_must_fail_acceptable () {
+	if test "$1" = "env"
+	then
+		shift
+		while test $# -gt 0
+		do
+			case "$1" in
+			*?=*)
+				shift
+				;;
+			*)
+				break
+				;;
+			esac
+		done
+	fi
+
+	case "$1" in
+	git|__git*|test-tool|test_terminal)
+		return 0
+		;;
+	*)
+		return 1
+		;;
+	esac
 }
 
 # This is not among top-level (test_expect_success | test_expect_failure)
@@ -535,25 +907,65 @@ test_line_count () {
 #
 # Writing this as "! git checkout ../outerspace" is wrong, because
 # the failure could be due to a segv.  We want a controlled failure.
+#
+# Accepts the following options:
+#
+#   ok=<signal-name>[,<...>]:
+#     Don't treat an exit caused by the given signal as error.
+#     Multiple signals can be specified as a comma separated list.
+#     Currently recognized signal names are: sigpipe, success.
+#     (Don't use 'success', use 'test_might_fail' instead.)
+#
+# Do not use this to run anything but "git" and other specific testable
+# commands (see test_must_fail_acceptable()).  We are not in the
+# business of vetting system supplied commands -- in other words, this
+# is wrong:
+#
+#    test_must_fail grep pattern output
+#
+# Instead use '!':
+#
+#    ! grep pattern output
 
 test_must_fail () {
-	"$@"
+	case "$1" in
+	ok=*)
+		_test_ok=${1#ok=}
+		shift
+		;;
+	*)
+		_test_ok=
+		;;
+	esac
+	if ! test_must_fail_acceptable "$@"
+	then
+		echo >&7 "test_must_fail: only 'git' is allowed: $*"
+		return 1
+	fi
+	"$@" 2>&7
 	exit_code=$?
-	if test $exit_code = 0; then
-		echo >&2 "test_must_fail: command succeeded: $*"
+	if test $exit_code -eq 0 && ! list_contains "$_test_ok" success
+	then
+		echo >&4 "test_must_fail: command succeeded: $*"
 		return 1
-	elif test $exit_code -gt 129 && test $exit_code -le 192; then
-		echo >&2 "test_must_fail: died by signal: $*"
+	elif test_match_signal 13 $exit_code && list_contains "$_test_ok" sigpipe
+	then
+		return 0
+	elif test $exit_code -gt 129 && test $exit_code -le 192
+	then
+		echo >&4 "test_must_fail: died by signal $(($exit_code - 128)): $*"
 		return 1
-	elif test $exit_code = 127; then
-		echo >&2 "test_must_fail: command not found: $*"
+	elif test $exit_code -eq 127
+	then
+		echo >&4 "test_must_fail: command not found: $*"
 		return 1
-	elif test $exit_code = 126; then
-		echo >&2 "test_must_fail: valgrind error: $*"
+	elif test $exit_code -eq 126
+	then
+		echo >&4 "test_must_fail: valgrind error: $*"
 		return 1
 	fi
 	return 0
-}
+} 7>&2 2>&4
 
 # Similar to test_must_fail, but tolerates success, too.  This is
 # meant to be used in contexts like:
@@ -565,19 +977,12 @@ test_must_fail () {
 #
 # Writing "git config --unset all.configuration || :" would be wrong,
 # because we want to notice if it fails due to segv.
+#
+# Accepts the same options as test_must_fail.
 
 test_might_fail () {
-	"$@"
-	exit_code=$?
-	if test $exit_code -gt 129 && test $exit_code -le 192; then
-		echo >&2 "test_might_fail: died by signal: $*"
-		return 1
-	elif test $exit_code = 127; then
-		echo >&2 "test_might_fail: command not found: $*"
-		return 1
-	fi
-	return 0
-}
+	test_must_fail ok=success "$@" 2>&7
+} 7>&2 2>&4
 
 # Similar to test_must_fail and test_might_fail, but check that a
 # given command exited with a given exit code. Meant to be used as:
@@ -589,16 +994,16 @@ test_might_fail () {
 test_expect_code () {
 	want_code=$1
 	shift
-	"$@"
+	"$@" 2>&7
 	exit_code=$?
 	if test $exit_code = $want_code
 	then
 		return 0
 	fi
 
-	echo >&2 "test_expect_code: command exited with $exit_code, we wanted $want_code $*"
+	echo >&4 "test_expect_code: command exited with $exit_code, we wanted $want_code $*"
 	return 1
-}
+} 7>&2 2>&4
 
 # test_cmp is a helper function to compare actual and expected output.
 # You can use it like:
@@ -613,20 +1018,93 @@ test_expect_code () {
 # - cmp's output is not nearly as easy to read as diff -u
 # - not all diff versions understand "-u"
 
-test_cmp() {
-	$GIT_TEST_CMP "$@"
+test_cmp () {
+	test "$#" -ne 2 && BUG "2 param"
+	eval "$GIT_TEST_CMP" '"$@"'
+}
+
+# Check that the given config key has the expected value.
+#
+#    test_cmp_config [-C <dir>] <expected-value>
+#                    [<git-config-options>...] <config-key>
+#
+# for example to check that the value of core.bar is foo
+#
+#    test_cmp_config foo core.bar
+#
+test_cmp_config () {
+	local GD &&
+	if test "$1" = "-C"
+	then
+		shift &&
+		GD="-C $1" &&
+		shift
+	fi &&
+	printf "%s\n" "$1" >expect.config &&
+	shift &&
+	git $GD config "$@" >actual.config &&
+	test_cmp expect.config actual.config
 }
 
 # test_cmp_bin - helper to compare binary files
 
-test_cmp_bin() {
+test_cmp_bin () {
+	test "$#" -ne 2 && BUG "2 param"
 	cmp "$@"
+}
+
+# Wrapper for grep which used to be used for
+# GIT_TEST_GETTEXT_POISON=false. Only here as a shim for other
+# in-flight changes. Should not be used and will be removed soon.
+test_i18ngrep () {
+	eval "last_arg=\${$#}"
+
+	test -f "$last_arg" ||
+	BUG "test_i18ngrep requires a file to read as the last parameter"
+
+	if test $# -lt 2 ||
+	   { test "x!" = "x$1" && test $# -lt 3 ; }
+	then
+		BUG "too few parameters to test_i18ngrep"
+	fi
+
+	if test "x!" = "x$1"
+	then
+		shift
+		! grep "$@" && return 0
+
+		echo >&4 "error: '! grep $@' did find a match in:"
+	else
+		grep "$@" && return 0
+
+		echo >&4 "error: 'grep $@' didn't find a match in:"
+	fi
+
+	if test -s "$last_arg"
+	then
+		cat >&4 "$last_arg"
+	else
+		echo >&4 "<File '$last_arg' is empty>"
+	fi
+
+	return 1
+}
+
+# Call any command "$@" but be more verbose about its
+# failure. This is handy for commands like "test" which do
+# not output anything when they fail.
+verbose () {
+	"$@" && return 0
+	echo >&4 "command failed: $(git rev-parse --sq-quote "$@")"
+	return 1
 }
 
 # Check if the file expected to be empty is indeed empty, and barfs
 # otherwise.
 
 test_must_be_empty () {
+	test "$#" -ne 1 && BUG "1 param"
+	test_path_is_file "$1" &&
 	if test -s "$1"
 	then
 		echo "'$1' is not empty, it contains:"
@@ -635,32 +1113,73 @@ test_must_be_empty () {
 	fi
 }
 
-# Tests that its two parameters refer to the same revision
+# Tests that its two parameters refer to the same revision, or if '!' is
+# provided first, that its other two parameters refer to different
+# revisions.
 test_cmp_rev () {
-	git rev-parse --verify "$1" >expect.rev &&
-	git rev-parse --verify "$2" >actual.rev &&
-	test_cmp expect.rev actual.rev
+	local op='=' wrong_result=different
+
+	if test $# -ge 1 && test "x$1" = 'x!'
+	then
+	    op='!='
+	    wrong_result='the same'
+	    shift
+	fi
+	if test $# != 2
+	then
+		BUG "test_cmp_rev requires two revisions, but got $#"
+	else
+		local r1 r2
+		r1=$(git rev-parse --verify "$1") &&
+		r2=$(git rev-parse --verify "$2") || return 1
+
+		if ! test "$r1" "$op" "$r2"
+		then
+			cat >&4 <<-EOF
+			error: two revisions point to $wrong_result objects:
+			  '$1': $r1
+			  '$2': $r2
+			EOF
+			return 1
+		fi
+	fi
 }
 
-# Print a sequence of numbers or letters in increasing order.  This is
-# similar to GNU seq(1), but the latter might not be available
-# everywhere (and does not do letters).  It may be used like:
+# Compare paths respecting core.ignoreCase
+test_cmp_fspath () {
+	if test "x$1" = "x$2"
+	then
+		return 0
+	fi
+
+	if test true != "$(git config --get --type=bool core.ignorecase)"
+	then
+		return 1
+	fi
+
+	test "x$(echo "$1" | tr A-Z a-z)" =  "x$(echo "$2" | tr A-Z a-z)"
+}
+
+# Print a sequence of integers in increasing order, either with
+# two arguments (start and end):
 #
-#	for i in `test_seq 100`; do
-#		for j in `test_seq 10 20`; do
-#			for k in `test_seq a z`; do
-#				echo $i-$j-$k
-#			done
-#		done
-#	done
+#     test_seq 1 5 -- outputs 1 2 3 4 5 one line at a time
+#
+# or with one argument (end), in which case it starts counting
+# from 1.
 
 test_seq () {
 	case $# in
 	1)	set 1 "$@" ;;
 	2)	;;
-	*)	error "bug in the test script: not 1 or 2 parameters to test_seq" ;;
+	*)	BUG "not 1 or 2 parameters to test_seq" ;;
 	esac
-	perl -le 'print for $ARGV[0]..$ARGV[1]' -- "$@"
+	test_seq_counter__=$1
+	while test "$test_seq_counter__" -le "$2"
+	do
+		echo "$test_seq_counter__"
+		test_seq_counter__=$(( $test_seq_counter__ + 1 ))
+	done
 }
 
 # This function can be used to schedule some commands to be run
@@ -687,23 +1206,47 @@ test_seq () {
 # what went wrong.
 
 test_when_finished () {
+	# We cannot detect when we are in a subshell in general, but by
+	# doing so on Bash is better than nothing (the test will
+	# silently pass on other shells).
+	test "${BASH_SUBSHELL-0}" = 0 ||
+	BUG "test_when_finished does nothing in a subshell"
 	test_cleanup="{ $*
 		} && (exit \"\$eval_ret\"); eval_ret=\$?; $test_cleanup"
 }
 
-# Most tests can use the created repository, but some may need to create more.
+# This function can be used to schedule some commands to be run
+# unconditionally at the end of the test script, e.g. to stop a daemon:
+#
+#	test_expect_success 'test git daemon' '
+#		git daemon &
+#		daemon_pid=$! &&
+#		test_atexit 'kill $daemon_pid' &&
+#		hello world
+#	'
+#
+# The commands will be executed before the trash directory is removed,
+# i.e. the atexit commands will still be able to access any pidfiles or
+# socket files.
+#
+# Note that these commands will be run even when a test script run
+# with '--immediate' fails.  Be careful with your atexit commands to
+# minimize any changes to the failed state.
+
+test_atexit () {
+	# We cannot detect when we are in a subshell in general, but by
+	# doing so on Bash is better than nothing (the test will
+	# silently pass on other shells).
+	test "${BASH_SUBSHELL-0}" = 0 ||
+	BUG "test_atexit does nothing in a subshell"
+	test_atexit_cleanup="{ $*
+		} && (exit \"\$eval_ret\"); eval_ret=\$?; $test_atexit_cleanup"
+}
+
+# Deprecated wrapper for "git init", use "git init" directly instead
 # Usage: test_create_repo <directory>
 test_create_repo () {
-	test "$#" = 1 ||
-	error "bug in the test script: not 1 parameter to test-create-repo"
-	repo="$1"
-	mkdir -p "$repo"
-	(
-		cd "$repo" || error "Cannot setup test environment"
-		"$GIT_EXEC_PATH/git-init" "--template=$GIT_BUILD_DIR/templates/blt/" >&3 2>&4 ||
-		error "cannot run git init -- have you built things yet?"
-		mv .git/hooks .git/hooks-disabled
-	) || exit
+	git init "$@"
 }
 
 # This function helps on symlink challenged file systems when it is not
@@ -719,7 +1262,9 @@ test_ln_s_add () {
 	else
 		printf '%s' "$1" >"$2" &&
 		ln_s_obj=$(git hash-object -w "$2") &&
-		git update-index --add --cacheinfo 120000 $ln_s_obj "$2"
+		git update-index --add --cacheinfo 120000 $ln_s_obj "$2" &&
+		# pick up stat info from the file
+		git update-index "$2"
 	fi
 }
 
@@ -729,65 +1274,51 @@ test_write_lines () {
 }
 
 perl () {
-	command "$PERL_PATH" "$@"
-}
+	command "$PERL_PATH" "$@" 2>&7
+} 7>&2 2>&4
 
-# Is the value one of the various ways to spell a boolean true/false?
-test_normalize_bool () {
-	git -c magic.variable="$1" config --bool magic.variable 2>/dev/null
-}
+# Given the name of an environment variable with a bool value, normalize
+# its value to a 0 (true) or 1 (false or empty string) return code.
+#
+#   test_bool_env GIT_TEST_HTTPD <default-value>
+#
+# Return with code corresponding to the given default value if the variable
+# is unset.
+# Abort the test script if either the value of the variable or the default
+# are not valid bool values.
 
-# Given a variable $1, normalize the value of it to one of "true",
-# "false", or "auto" and store the result to it.
-#
-#     test_tristate GIT_TEST_HTTPD
-#
-# A variable set to an empty string is set to 'false'.
-# A variable set to 'false' or 'auto' keeps its value.
-# Anything else is set to 'true'.
-# An unset variable defaults to 'auto'.
-#
-# The last rule is to allow people to set the variable to an empty
-# string and export it to decline testing the particular feature
-# for versions both before and after this change.  We used to treat
-# both unset and empty variable as a signal for "do not test" and
-# took any non-empty string as "please test".
-
-test_tristate () {
-	if eval "test x\"\${$1+isset}\" = xisset"
+test_bool_env () {
+	if test $# != 2
 	then
-		# explicitly set
-		eval "
-			case \"\$$1\" in
-			'')	$1=false ;;
-			auto)	;;
-			*)	$1=\$(test_normalize_bool \$$1 || echo true) ;;
-			esac
-		"
-	else
-		eval "$1=auto"
+		BUG "test_bool_env requires two parameters (variable name and default value)"
 	fi
+
+	git env--helper --type=bool --default="$2" --exit-code "$1"
+	ret=$?
+	case $ret in
+	0|1)	# unset or valid bool value
+		;;
+	*)	# invalid bool value or something unexpected
+		error >&7 "test_bool_env requires bool values both for \$$1 and for the default fallback"
+		;;
+	esac
+	return $ret
 }
 
 # Exit the test suite, either by skipping all remaining tests or by
-# exiting with an error. If "$1" is "auto", we then we assume we were
-# opportunistically trying to set up some tests and we skip. If it is
-# "true", then we report a failure.
+# exiting with an error. If our prerequisite variable $1 falls back
+# on a default assume we were opportunistically trying to set up some
+# tests and we skip. If it is explicitly "true", then we report a failure.
 #
 # The error/skip message should be given by $2.
 #
 test_skip_or_die () {
-	case "$1" in
-	auto)
+	if ! test_bool_env "$1" false
+	then
 		skip_all=$2
 		test_done
-		;;
-	true)
-		error "$2"
-		;;
-	*)
-		error "BUG: test tristate is '$1' (real error: $2)"
-	esac
+	fi
+	error "$2"
 }
 
 # The following mingw_* functions obey POSIX shell syntax, but are actually
@@ -854,4 +1385,332 @@ mingw_read_file_strip_cr_ () {
 		fi
 		eval "$1=\$$1\$line"
 	done
+}
+
+# Like "env FOO=BAR some-program", but run inside a subshell, which means
+# it also works for shell functions (though those functions cannot impact
+# the environment outside of the test_env invocation).
+test_env () {
+	(
+		while test $# -gt 0
+		do
+			case "$1" in
+			*=*)
+				eval "${1%%=*}=\${1#*=}"
+				eval "export ${1%%=*}"
+				shift
+				;;
+			*)
+				"$@" 2>&7
+				exit
+				;;
+			esac
+		done
+	)
+} 7>&2 2>&4
+
+# Returns true if the numeric exit code in "$2" represents the expected signal
+# in "$1". Signals should be given numerically.
+test_match_signal () {
+	if test "$2" = "$((128 + $1))"
+	then
+		# POSIX
+		return 0
+	elif test "$2" = "$((256 + $1))"
+	then
+		# ksh
+		return 0
+	fi
+	return 1
+}
+
+# Read up to "$1" bytes (or to EOF) from stdin and write them to stdout.
+test_copy_bytes () {
+	perl -e '
+		my $len = $ARGV[1];
+		while ($len > 0) {
+			my $s;
+			my $nread = sysread(STDIN, $s, $len);
+			die "cannot read: $!" unless defined($nread);
+			last unless $nread;
+			print $s;
+			$len -= $nread;
+		}
+	' - "$1"
+}
+
+# run "$@" inside a non-git directory
+nongit () {
+	test -d non-repo ||
+	mkdir non-repo ||
+	return 1
+
+	(
+		GIT_CEILING_DIRECTORIES=$(pwd) &&
+		export GIT_CEILING_DIRECTORIES &&
+		cd non-repo &&
+		"$@" 2>&7
+	)
+} 7>&2 2>&4
+
+# convert function arguments or stdin (if not arguments given) to pktline
+# representation. If multiple arguments are given, they are separated by
+# whitespace and put in a single packet. Note that data containing NULs must be
+# given on stdin, and that empty input becomes an empty packet, not a flush
+# packet (for that you can just print 0000 yourself).
+packetize () {
+	if test $# -gt 0
+	then
+		packet="$*"
+		printf '%04x%s' "$((4 + ${#packet}))" "$packet"
+	else
+		perl -e '
+			my $packet = do { local $/; <STDIN> };
+			printf "%04x%s", 4 + length($packet), $packet;
+		'
+	fi
+}
+
+# Parse the input as a series of pktlines, writing the result to stdout.
+# Sideband markers are removed automatically, and the output is routed to
+# stderr if appropriate.
+#
+# NUL bytes are converted to "\\0" for ease of parsing with text tools.
+depacketize () {
+	perl -e '
+		while (read(STDIN, $len, 4) == 4) {
+			if ($len eq "0000") {
+				print "FLUSH\n";
+			} else {
+				read(STDIN, $buf, hex($len) - 4);
+				$buf =~ s/\0/\\0/g;
+				if ($buf =~ s/^[\x2\x3]//) {
+					print STDERR $buf;
+				} else {
+					$buf =~ s/^\x1//;
+					print $buf;
+				}
+			}
+		}
+	'
+}
+
+# Converts base-16 data into base-8. The output is given as a sequence of
+# escaped octals, suitable for consumption by 'printf'.
+hex2oct () {
+	perl -ne 'printf "\\%03o", hex for /../g'
+}
+
+# Set the hash algorithm in use to $1.  Only useful when testing the testsuite.
+test_set_hash () {
+	test_hash_algo="$1"
+}
+
+# Detect the hash algorithm in use.
+test_detect_hash () {
+	test_hash_algo="${GIT_TEST_DEFAULT_HASH:-sha1}"
+}
+
+# Load common hash metadata and common placeholder object IDs for use with
+# test_oid.
+test_oid_init () {
+	test -n "$test_hash_algo" || test_detect_hash &&
+	test_oid_cache <"$TEST_DIRECTORY/oid-info/hash-info" &&
+	test_oid_cache <"$TEST_DIRECTORY/oid-info/oid"
+}
+
+# Load key-value pairs from stdin suitable for use with test_oid.  Blank lines
+# and lines starting with "#" are ignored.  Keys must be shell identifier
+# characters.
+#
+# Examples:
+# rawsz sha1:20
+# rawsz sha256:32
+test_oid_cache () {
+	local tag rest k v &&
+
+	{ test -n "$test_hash_algo" || test_detect_hash; } &&
+	while read tag rest
+	do
+		case $tag in
+		\#*)
+			continue;;
+		?*)
+			# non-empty
+			;;
+		*)
+			# blank line
+			continue;;
+		esac &&
+
+		k="${rest%:*}" &&
+		v="${rest#*:}" &&
+
+		if ! expr "$k" : '[a-z0-9][a-z0-9]*$' >/dev/null
+		then
+			BUG 'bad hash algorithm'
+		fi &&
+		eval "test_oid_${k}_$tag=\"\$v\""
+	done
+}
+
+# Look up a per-hash value based on a key ($1).  The value must have been loaded
+# by test_oid_init or test_oid_cache.
+test_oid () {
+	local algo="${test_hash_algo}" &&
+
+	case "$1" in
+	--hash=*)
+		algo="${1#--hash=}" &&
+		shift;;
+	*)
+		;;
+	esac &&
+
+	local var="test_oid_${algo}_$1" &&
+
+	# If the variable is unset, we must be missing an entry for this
+	# key-hash pair, so exit with an error.
+	if eval "test -z \"\${$var+set}\""
+	then
+		BUG "undefined key '$1'"
+	fi &&
+	eval "printf '%s' \"\${$var}\""
+}
+
+# Insert a slash into an object ID so it can be used to reference a location
+# under ".git/objects".  For example, "deadbeef..." becomes "de/adbeef..".
+test_oid_to_path () {
+	local basename=${1#??}
+	echo "${1%$basename}/$basename"
+}
+
+# Choose a port number based on the test script's number and store it in
+# the given variable name, unless that variable already contains a number.
+test_set_port () {
+	local var=$1 port
+
+	if test $# -ne 1 || test -z "$var"
+	then
+		BUG "test_set_port requires a variable name"
+	fi
+
+	eval port=\$$var
+	case "$port" in
+	"")
+		# No port is set in the given env var, use the test
+		# number as port number instead.
+		# Remove not only the leading 't', but all leading zeros
+		# as well, so the arithmetic below won't (mis)interpret
+		# a test number like '0123' as an octal value.
+		port=${this_test#${this_test%%[1-9]*}}
+		if test "${port:-0}" -lt 1024
+		then
+			# root-only port, use a larger one instead.
+			port=$(($port + 10000))
+		fi
+		;;
+	*[!0-9]*|0*)
+		error >&7 "invalid port number: $port"
+		;;
+	*)
+		# The user has specified the port.
+		;;
+	esac
+
+	# Make sure that parallel '--stress' test jobs get different
+	# ports.
+	port=$(($port + ${GIT_TEST_STRESS_JOB_NR:-0}))
+	eval $var=$port
+}
+
+# Tests for the hidden file attribute on Windows
+test_path_is_hidden () {
+	test_have_prereq MINGW ||
+	BUG "test_path_is_hidden can only be used on Windows"
+
+	# Use the output of `attrib`, ignore the absolute path
+	case "$("$SYSTEMROOT"/system32/attrib "$1")" in *H*?:*) return 0;; esac
+	return 1
+}
+
+# Check that the given command was invoked as part of the
+# trace2-format trace on stdin.
+#
+#	test_subcommand [!] <command> <args>... < <trace>
+#
+# For example, to look for an invocation of "git upload-pack
+# /path/to/repo"
+#
+#	GIT_TRACE2_EVENT=event.log git fetch ... &&
+#	test_subcommand git upload-pack "$PATH" <event.log
+#
+# If the first parameter passed is !, this instead checks that
+# the given command was not called.
+#
+test_subcommand () {
+	local negate=
+	if test "$1" = "!"
+	then
+		negate=t
+		shift
+	fi
+
+	local expr=$(printf '"%s",' "$@")
+	expr="${expr%,}"
+
+	if test -n "$negate"
+	then
+		! grep "\[$expr\]"
+	else
+		grep "\[$expr\]"
+	fi
+}
+
+# Check that the given command was invoked as part of the
+# trace2-format trace on stdin.
+#
+#	test_region [!] <category> <label> git <command> <args>...
+#
+# For example, to look for trace2_region_enter("index", "do_read_index", repo)
+# in an invocation of "git checkout HEAD~1", run
+#
+#	GIT_TRACE2_EVENT="$(pwd)/trace.txt" GIT_TRACE2_EVENT_NESTING=10 \
+#		git checkout HEAD~1 &&
+#	test_region index do_read_index <trace.txt
+#
+# If the first parameter passed is !, this instead checks that
+# the given region was not entered.
+#
+test_region () {
+	local expect_exit=0
+	if test "$1" = "!"
+	then
+		expect_exit=1
+		shift
+	fi
+
+	grep -e	'"region_enter".*"category":"'"$1"'","label":"'"$2"\" "$3"
+	exitcode=$?
+
+	if test $exitcode != $expect_exit
+	then
+		return 1
+	fi
+
+	grep -e	'"region_leave".*"category":"'"$1"'","label":"'"$2"\" "$3"
+	exitcode=$?
+
+	if test $exitcode != $expect_exit
+	then
+		return 1
+	fi
+
+	return 0
+}
+
+# Print the destination of symlink(s) provided as arguments. Basically
+# the same as the readlink command, but it's not available everywhere.
+test_readlink () {
+	perl -le 'print readlink($_) for @ARGV' "$@"
 }

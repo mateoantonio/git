@@ -21,6 +21,9 @@ test_description='--ancestry-path'
 #  --ancestry-path G..M -- G.t == L
 #  --ancestry-path --simplify-merges G^..M -- G.t == G L
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 test_merge () {
@@ -95,10 +98,9 @@ test_expect_success 'rev-list --ancestry-path F...I' '
 
 # G.t is dropped in an "-s ours" merge
 test_expect_success 'rev-list G..M -- G.t' '
-	>expect &&
 	git rev-list --format=%s G..M -- G.t |
 	sed -e "/^commit /d" >actual &&
-	test_cmp expect actual
+	test_must_be_empty actual
 '
 
 test_expect_success 'rev-list --ancestry-path G..M -- G.t' '
@@ -129,29 +131,29 @@ test_expect_success 'setup criss-cross' '
 	(cd criss-cross &&
 	 git init &&
 	 test_commit A &&
-	 git checkout -b xb master &&
+	 git checkout -b xb main &&
 	 test_commit B &&
-	 git checkout -b xc master &&
+	 git checkout -b xc main &&
 	 test_commit C &&
 	 git checkout -b xbc xb -- &&
 	 git merge xc &&
 	 git checkout -b xcb xc -- &&
 	 git merge xb &&
-	 git checkout master)
+	 git checkout main)
 '
 
 # no commits in bc descend from cb
 test_expect_success 'criss-cross: rev-list --ancestry-path cb..bc' '
 	(cd criss-cross &&
 	 git rev-list --ancestry-path xcb..xbc > actual &&
-	 test -z "$(cat actual)")
+	 test_must_be_empty actual)
 '
 
 # no commits in repository descend from cb
 test_expect_success 'criss-cross: rev-list --ancestry-path --all ^cb' '
 	(cd criss-cross &&
 	 git rev-list --ancestry-path --all ^xcb > actual &&
-	 test -z "$(cat actual)")
+	 test_must_be_empty actual)
 '
 
 test_done

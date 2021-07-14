@@ -5,6 +5,9 @@
 
 test_description='git rev-list --pretty=format test'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-terminal.sh
 
@@ -35,17 +38,17 @@ test_expect_success 'setup' '
 	: >foo &&
 	git add foo &&
 	git config i18n.commitEncoding $test_encoding &&
-	git commit -m "$added_iso88591" &&
+	echo "$added_iso88591" | git commit -F - &&
 	head1=$(git rev-parse --verify HEAD) &&
 	head1_short=$(git rev-parse --verify --short $head1) &&
 	tree1=$(git rev-parse --verify HEAD:) &&
 	tree1_short=$(git rev-parse --verify --short $tree1) &&
 	echo "$changed" > foo &&
-	git commit -a -m "$changed_iso88591" &&
+	echo "$changed_iso88591" | git commit -a -F - &&
 	head2=$(git rev-parse --verify HEAD) &&
 	head2_short=$(git rev-parse --verify --short $head2) &&
 	tree2=$(git rev-parse --verify HEAD:) &&
-	tree2_short=$(git rev-parse --verify --short $tree2)
+	tree2_short=$(git rev-parse --verify --short $tree2) &&
 	git config --unset i18n.commitEncoding
 '
 
@@ -53,16 +56,20 @@ test_expect_success 'setup' '
 test_format () {
 	cat >expect.$1
 	test_expect_${3:-success} "format $1" "
-		git rev-list --pretty=format:'$2' master >output.$1 &&
+		git rev-list --pretty=format:'$2' main >output.$1 &&
 		test_cmp expect.$1 output.$1
 	"
 }
 
 # Feed to --format to provide predictable colored sequences.
+BASIC_COLOR='%Credfoo%Creset'
+COLOR='%C(red)foo%C(reset)'
 AUTO_COLOR='%C(auto,red)foo%C(auto,reset)'
+ALWAYS_COLOR='%C(always,red)foo%C(always,reset)'
 has_color () {
-	printf '\033[31mfoo\033[m\n' >expect &&
-	test_cmp expect "$1"
+	test_decode_color <"$1" >decoded &&
+	echo "<RED>foo<RESET>" >expect &&
+	test_cmp expect decoded
 }
 
 has_no_color () {
@@ -105,31 +112,35 @@ commit $head1
 EOF
 
 # we don't test relative here
-test_format author %an%n%ae%n%ad%n%aD%n%at <<EOF
+test_format author %an%n%ae%n%al%n%ad%n%aD%n%at <<EOF
 commit $head2
-A U Thor
-author@example.com
+$GIT_AUTHOR_NAME
+$GIT_AUTHOR_EMAIL
+$TEST_AUTHOR_LOCALNAME
 Thu Apr 7 15:13:13 2005 -0700
 Thu, 7 Apr 2005 15:13:13 -0700
 1112911993
 commit $head1
-A U Thor
-author@example.com
+$GIT_AUTHOR_NAME
+$GIT_AUTHOR_EMAIL
+$TEST_AUTHOR_LOCALNAME
 Thu Apr 7 15:13:13 2005 -0700
 Thu, 7 Apr 2005 15:13:13 -0700
 1112911993
 EOF
 
-test_format committer %cn%n%ce%n%cd%n%cD%n%ct <<EOF
+test_format committer %cn%n%ce%n%cl%n%cd%n%cD%n%ct <<EOF
 commit $head2
-C O Mitter
-committer@example.com
+$GIT_COMMITTER_NAME
+$GIT_COMMITTER_EMAIL
+$TEST_COMMITTER_LOCALNAME
 Thu Apr 7 15:13:13 2005 -0700
 Thu, 7 Apr 2005 15:13:13 -0700
 1112911993
 commit $head1
-C O Mitter
-committer@example.com
+$GIT_COMMITTER_NAME
+$GIT_COMMITTER_EMAIL
+$TEST_COMMITTER_LOCALNAME
 Thu Apr 7 15:13:13 2005 -0700
 Thu, 7 Apr 2005 15:13:13 -0700
 1112911993
@@ -170,57 +181,105 @@ $added
 
 EOF
 
-test_format colors %Credfoo%Cgreenbar%Cbluebaz%Cresetxyzzy <<EOF
-commit $head2
-[31mfoo[32mbar[34mbaz[mxyzzy
-commit $head1
-[31mfoo[32mbar[34mbaz[mxyzzy
-EOF
-
-test_format advanced-colors '%C(red yellow bold)foo%C(reset)' <<EOF
-commit $head2
-[1;31;43mfoo[m
-commit $head1
-[1;31;43mfoo[m
-EOF
-
-test_expect_success '%C(auto) does not enable color by default' '
-	git log --format=$AUTO_COLOR -1 >actual &&
-	has_no_color actual
+test_expect_success 'basic colors' '
+	cat >expect <<-EOF &&
+	commit $head2
+	<RED>foo<GREEN>bar<BLUE>baz<RESET>xyzzy
+	EOF
+	format="%Credfoo%Cgreenbar%Cbluebaz%Cresetxyzzy" &&
+	git rev-list --color --format="$format" -1 main >actual.raw &&
+	test_decode_color <actual.raw >actual &&
+	test_cmp expect actual
 '
 
-test_expect_success '%C(auto) enables colors for color.diff' '
-	git -c color.diff=always log --format=$AUTO_COLOR -1 >actual &&
-	has_color actual
+test_expect_success '%S is not a placeholder for rev-list yet' '
+	git rev-list --format="%S" -1 main | grep "%S"
 '
 
-test_expect_success '%C(auto) enables colors for color.ui' '
-	git -c color.ui=always log --format=$AUTO_COLOR -1 >actual &&
+test_expect_success 'advanced colors' '
+	cat >expect <<-EOF &&
+	commit $head2
+	<BOLD;RED;BYELLOW>foo<RESET>
+	EOF
+	format="%C(red yellow bold)foo%C(reset)" &&
+	git rev-list --color --format="$format" -1 main >actual.raw &&
+	test_decode_color <actual.raw >actual &&
+	test_cmp expect actual
+'
+
+for spec in \
+	"%Cred:$BASIC_COLOR" \
+	"%C(...):$COLOR" \
+	"%C(auto,...):$AUTO_COLOR"
+do
+	desc=${spec%%:*}
+	color=${spec#*:}
+	test_expect_success "$desc does not enable color by default" '
+		git log --format=$color -1 >actual &&
+		has_no_color actual
+	'
+
+	test_expect_success "$desc enables colors for color.diff" '
+		git -c color.diff=always log --format=$color -1 >actual &&
+		has_color actual
+	'
+
+	test_expect_success "$desc enables colors for color.ui" '
+		git -c color.ui=always log --format=$color -1 >actual &&
+		has_color actual
+	'
+
+	test_expect_success "$desc respects --color" '
+		git log --format=$color -1 --color >actual &&
+		has_color actual
+	'
+
+	test_expect_success "$desc respects --no-color" '
+		git -c color.ui=always log --format=$color -1 --no-color >actual &&
+		has_no_color actual
+	'
+
+	test_expect_success TTY "$desc respects --color=auto (stdout is tty)" '
+		test_terminal git log --format=$color -1 --color=auto >actual &&
+		has_color actual
+	'
+
+	test_expect_success "$desc respects --color=auto (stdout not tty)" '
+		(
+			TERM=vt100 && export TERM &&
+			git log --format=$color -1 --color=auto >actual &&
+			has_no_color actual
+		)
+	'
+done
+
+test_expect_success '%C(always,...) enables color even without tty' '
+	git log --format=$ALWAYS_COLOR -1 >actual &&
 	has_color actual
 '
 
 test_expect_success '%C(auto) respects --color' '
-	git log --format=$AUTO_COLOR -1 --color >actual &&
-	has_color actual
+	git log --color --format="%C(auto)%H" -1 >actual.raw &&
+	test_decode_color <actual.raw >actual &&
+	echo "<YELLOW>$(git rev-parse HEAD)<RESET>" >expect &&
+	test_cmp expect actual
 '
 
 test_expect_success '%C(auto) respects --no-color' '
-	git -c color.ui=always log --format=$AUTO_COLOR -1 --no-color >actual &&
-	has_no_color actual
+	git log --no-color --format="%C(auto)%H" -1 >actual &&
+	git rev-parse HEAD >expect &&
+	test_cmp expect actual
 '
 
-test_expect_success TTY '%C(auto) respects --color=auto (stdout is tty)' '
-	test_terminal env TERM=vt100 \
-		git log --format=$AUTO_COLOR -1 --color=auto >actual &&
-	has_color actual
-'
-
-test_expect_success '%C(auto) respects --color=auto (stdout not tty)' '
-	(
-		TERM=vt100 && export TERM &&
-		git log --format=$AUTO_COLOR -1 --color=auto >actual &&
-		has_no_color actual
-	)
+test_expect_success 'rev-list %C(auto,...) respects --color' '
+	git rev-list --color --format="%C(auto,green)foo%C(auto,reset)" \
+		-1 HEAD >actual.raw &&
+	test_decode_color <actual.raw >actual &&
+	cat >expect <<-EOF &&
+	commit $(git rev-parse HEAD)
+	<GREEN>foo<RESET>
+	EOF
+	test_cmp expect actual
 '
 
 iconv -f utf-8 -t $test_encoding > commit-msg <<EOF
@@ -283,7 +342,7 @@ commit $head1
 .. (hinzugef${added_utf8_part_iso88591}gt) foo
 EOF
 
-test_expect_success 'prepare expected messages (for test %b)' '
+test_expect_success 'setup expected messages (for test %b)' '
 	cat <<-EOF >expected.utf-8 &&
 	commit $head3
 	This commit message is much longer than the others,
@@ -350,7 +409,7 @@ test_expect_success '%x00 shows NUL' '
 
 test_expect_success '%ad respects --date=' '
 	echo 2005-04-07 >expect.ad-short &&
-	git log -1 --date=short --pretty=tformat:%ad >output.ad-short master &&
+	git log -1 --date=short --pretty=tformat:%ad >output.ad-short main &&
 	test_cmp expect.ad-short output.ad-short
 '
 
@@ -358,10 +417,7 @@ test_expect_success 'empty email' '
 	test_tick &&
 	C=$(GIT_AUTHOR_EMAIL= git commit-tree HEAD^{tree} </dev/null) &&
 	A=$(git show --pretty=format:%an,%ae,%ad%n -s $C) &&
-	test "$A" = "A U Thor,,Thu Apr 7 15:14:13 2005 -0700" || {
-		echo "Eh? $A" >failure
-		false
-	}
+	verbose test "$A" = "$GIT_AUTHOR_NAME,,Thu Apr 7 15:14:13 2005 -0700"
 '
 
 test_expect_success 'del LF before empty (1)' '
@@ -402,17 +458,18 @@ test_expect_success '--abbrev' '
 	git log -1 --format="%h %h %h" HEAD >actual1 &&
 	git log -1 --abbrev=5 --format="%h %h %h" HEAD >actual2 &&
 	git log -1 --abbrev=5 --format="%H %H %H" HEAD >actual3 &&
-	sed -e "s/$_x40/LONG/g" -e "s/$_x05/SHORT/g" <actual2 >fuzzy2 &&
-	sed -e "s/$_x40/LONG/g" -e "s/$_x05/SHORT/g" <actual3 >fuzzy3 &&
+	sed -e "s/$OID_REGEX/LONG/g" -e "s/$_x05/SHORT/g" <actual2 >fuzzy2 &&
+	sed -e "s/$OID_REGEX/LONG/g" -e "s/$_x05/SHORT/g" <actual3 >fuzzy3 &&
 	test_cmp expect2 fuzzy2 &&
 	test_cmp expect3 fuzzy3 &&
 	! test_cmp actual1 actual2
 '
 
 test_expect_success '%H is not affected by --abbrev-commit' '
+	expected=$(($(test_oid hexsz) + 1)) &&
 	git log -1 --format=%H --abbrev-commit --abbrev=20 HEAD >actual &&
 	len=$(wc -c <actual) &&
-	test $len = 41
+	test $len = $expected
 '
 
 test_expect_success '%h is not affected by --abbrev-commit' '
@@ -440,21 +497,20 @@ test_expect_success '"%h %gD: %gs" is same as git-reflog (with --abbrev)' '
 '
 
 test_expect_success '%gd shortens ref name' '
-	echo "master@{0}" >expect.gd-short &&
-	git log -g -1 --format=%gd refs/heads/master >actual.gd-short &&
+	echo "main@{0}" >expect.gd-short &&
+	git log -g -1 --format=%gd refs/heads/main >actual.gd-short &&
 	test_cmp expect.gd-short actual.gd-short
 '
 
 test_expect_success 'reflog identity' '
-	echo "C O Mitter:committer@example.com" >expect &&
+	echo "$GIT_COMMITTER_NAME:$GIT_COMMITTER_EMAIL" >expect &&
 	git log -g -1 --format="%gn:%ge" >actual &&
 	test_cmp expect actual
 '
 
 test_expect_success 'oneline with empty message' '
-	git commit -m "dummy" --allow-empty &&
-	git commit -m "dummy" --allow-empty &&
-	git filter-branch --msg-filter "sed -e s/dummy//" HEAD^^.. &&
+	git commit --allow-empty --cleanup=verbatim -m "$LF" &&
+	git commit --allow-empty --allow-empty-message &&
 	git rev-list --oneline HEAD >test.txt &&
 	test_line_count = 5 test.txt &&
 	git rev-list --oneline --graph HEAD >testg.txt &&

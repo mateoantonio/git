@@ -1,5 +1,5 @@
 Like other projects, we also have some guidelines to keep to the
-code.  For Git in general, three rough rules are:
+code.  For Git in general, a few rough rules are:
 
  - Most importantly, we never say "It's in POSIX; we'll happily
    ignore your needs should your system not conform to it."
@@ -24,7 +24,7 @@ code.  For Git in general, three rough rules are:
 
    "Once it _is_ in the tree, it's not really worth the patch noise to
    go and fix it up."
-   Cf. http://article.gmane.org/gmane.linux.kernel/943020
+   Cf. http://lkml.iu.edu/hypermail/linux/kernel/1001.3/01069.html
 
 Make your code readable and sensible, and don't try to be clever.
 
@@ -75,7 +75,7 @@ For shell scripts specifically (not exhaustive):
 
  - If you want to find out if a command is available on the user's
    $PATH, you should use 'type <command>', instead of 'which <command>'.
-   The output of 'which' is not machine parseable and its exit code
+   The output of 'which' is not machine parsable and its exit code
    is not reliable across platforms.
 
  - We use POSIX compliant parameter substitutions and avoid bashisms;
@@ -91,15 +91,9 @@ For shell scripts specifically (not exhaustive):
 
    - No shell arrays.
 
-   - No strlen ${#parameter}.
-
    - No pattern replacement ${parameter/pattern/string}.
 
  - We use Arithmetic Expansion $(( ... )).
-
- - Inside Arithmetic Expansion, spell shell variables with $ in front
-   of them, as some shells do not grok $((x)) while accepting $(($x))
-   just fine (e.g. dash older than 0.5.4).
 
  - We do not use Process Substitution <(list) or >(list).
 
@@ -117,6 +111,24 @@ For shell scripts specifically (not exhaustive):
 	then
 		do this
 	fi
+
+ - If a command sequence joined with && or || or | spans multiple
+   lines, put each command on a separate line and put && and || and |
+   operators at the end of each line, rather than the start. This
+   means you don't need to use \ to join lines, since the above
+   operators imply the sequence isn't finished.
+
+	(incorrect)
+	grep blob verify_pack_result \
+	| awk -f print_1.awk \
+	| sort >actual &&
+	...
+
+	(correct)
+	grep blob verify_pack_result |
+	awk -f print_1.awk |
+	sort >actual &&
+	...
 
  - We prefer "test" over "[ ... ]".
 
@@ -163,6 +175,11 @@ For shell scripts specifically (not exhaustive):
 
    does not have such a problem.
 
+ - Even though "local" is not part of POSIX, we make heavy use of it
+   in our test suite.  We do not use it in scripted Porcelains, and
+   hopefully nobody starts using "local" before they are reimplemented
+   in C ;-)
+
 
 For C programs:
 
@@ -171,11 +188,36 @@ For C programs:
 
  - We try to keep to at most 80 characters per line.
 
- - We try to support a wide range of C compilers to compile Git with,
-   including old ones. That means that you should not use C99
-   initializers, even if a lot of compilers grok it.
+ - As a Git developer we assume you have a reasonably modern compiler
+   and we recommend you to enable the DEVELOPER makefile knob to
+   ensure your patch is clear of all compiler warnings we care about,
+   by e.g. "echo DEVELOPER=1 >>config.mak".
 
- - Variables have to be declared at the beginning of the block.
+ - We try to support a wide range of C compilers to compile Git with,
+   including old ones.  You should not use features from newer C
+   standard, even if your compiler groks them.
+
+   There are a few exceptions to this guideline:
+
+   . since early 2012 with e1327023ea, we have been using an enum
+     definition whose last element is followed by a comma.  This, like
+     an array initializer that ends with a trailing comma, can be used
+     to reduce the patch noise when adding a new identifier at the end.
+
+   . since mid 2017 with cbc0f81d, we have been using designated
+     initializers for struct (e.g. "struct t v = { .val = 'a' };").
+
+   . since mid 2017 with 512f41cf, we have been using designated
+     initializers for array (e.g. "int array[10] = { [5] = 2 }").
+
+   These used to be forbidden, but we have not heard any breakage
+   report, and they are assumed to be safe.
+
+ - Variables have to be declared at the beginning of the block, before
+   the first statement (i.e. -Wdeclaration-after-statement).
+
+ - Declaring a variable in the for loop "for (int i = 0; i < 10; i++)"
+   is still not allowed in this codebase.
 
  - NULL pointers shall be written as NULL, not as 0.
 
@@ -195,17 +237,56 @@ For C programs:
         while( condition )
 		func (bar+1);
 
+ - Do not explicitly compare an integral value with constant 0 or '\0',
+   or a pointer value with constant NULL.  For instance, to validate that
+   counted array <ptr, cnt> is initialized but has no elements, write:
+
+	if (!ptr || cnt)
+		BUG("empty array expected");
+
+   and not:
+
+	if (ptr == NULL || cnt != 0);
+		BUG("empty array expected");
+
  - We avoid using braces unnecessarily.  I.e.
 
 	if (bla) {
 		x = 1;
 	}
 
-   is frowned upon.  A gray area is when the statement extends
-   over a few lines, and/or you have a lengthy comment atop of
-   it.  Also, like in the Linux kernel, if there is a long list
-   of "else if" statements, it can make sense to add braces to
-   single line blocks.
+   is frowned upon. But there are a few exceptions:
+
+	- When the statement extends over a few lines (e.g., a while loop
+	  with an embedded conditional, or a comment). E.g.:
+
+		while (foo) {
+			if (x)
+				one();
+			else
+				two();
+		}
+
+		if (foo) {
+			/*
+			 * This one requires some explanation,
+			 * so we're better off with braces to make
+			 * it obvious that the indentation is correct.
+			 */
+			doit();
+		}
+
+	- When there are multiple arms to a conditional and some of them
+	  require braces, enclose even a single line block in braces for
+	  consistency. E.g.:
+
+		if (foo) {
+			doit();
+		} else {
+			one();
+			two();
+			three();
+		}
 
  - We try to avoid assignments in the condition of an "if" statement.
 
@@ -224,12 +305,12 @@ For C programs:
 
    Note however that a comment that explains a translatable string to
    translators uses a convention of starting with a magic token
-   "TRANSLATORS: " immediately after the opening delimiter, even when
-   it spans multiple lines.  We do not add an asterisk at the beginning
-   of each line, either.  E.g.
+   "TRANSLATORS: ", e.g.
 
-	/* TRANSLATORS: here is a comment that explains the string
-	   to be translated, that follows immediately after it */
+	/*
+	 * TRANSLATORS: here is a comment that explains the string to
+	 * be translated, that follows immediately after it.
+	 */
 	_("Here is a translatable string explained by the above.");
 
  - Double negation is often harder to understand than no negation
@@ -326,11 +407,19 @@ For C programs:
    string_list for sorted string lists, a hash map (mapping struct
    objects) named "struct decorate", amongst other things.
 
- - When you come up with an API, document it.
+ - When you come up with an API, document its functions and structures
+   in the header file that exposes the API to its callers. Use what is
+   in "strbuf.h" as a model for the appropriate tone and level of
+   detail.
 
- - The first #include in C files, except in platform specific
-   compat/ implementations, should be git-compat-util.h or another
-   header file that includes it, such as cache.h or builtin.h.
+ - The first #include in C files, except in platform specific compat/
+   implementations, must be either "git-compat-util.h", "cache.h" or
+   "builtin.h".  You do not have to include more than one of these.
+
+ - A C file must directly include the header files that declare the
+   functions and the types it uses, except for the functions and types
+   that are made available to it by including one of the header files
+   it must include by the previous rule.
 
  - If you are planning a new command, consider writing it in shell
    or perl first, so that changes in semantics can be easily
@@ -348,6 +437,17 @@ For C programs:
 
  - Use Git's gettext wrappers to make the user interface
    translatable. See "Marking strings for translation" in po/README.
+
+ - Variables and functions local to a given source file should be marked
+   with "static". Variables that are visible to other source files
+   must be declared with "extern" in header files. However, function
+   declarations should not use "extern", as that is already the default.
+
+ - You can launch gdb around your program using the shorthand GIT_DEBUGGER.
+   Run `GIT_DEBUGGER=1 ./bin-wrappers/git foo` to simply use gdb as is, or
+   run `GIT_DEBUGGER="<debugger> <debugger-args>" ./bin-wrappers/git foo` to
+   use your own debugger and arguments. Example: `GIT_DEBUGGER="ddd --gdb"
+   ./bin-wrappers/git log` (See `wrap-for-bin.sh`.)
 
 For Perl programs:
 
@@ -394,23 +494,46 @@ For Python scripts:
 
  - We follow PEP-8 (http://www.python.org/dev/peps/pep-0008/).
 
- - As a minimum, we aim to be compatible with Python 2.6 and 2.7.
+ - As a minimum, we aim to be compatible with Python 2.7.
 
  - Where required libraries do not restrict us to Python 2, we try to
    also be compatible with Python 3.1 and later.
-
- - When you must differentiate between Unicode literals and byte string
-   literals, it is OK to use the 'b' prefix.  Even though the Python
-   documentation for version 2.6 does not mention this prefix, it has
-   been supported since version 2.6.0.
 
 Error Messages
 
  - Do not end error messages with a full stop.
 
- - Do not capitalize ("unable to open %s", not "Unable to open %s")
+ - Do not capitalize the first word, only because it is the first word
+   in the message ("unable to open %s", not "Unable to open %s").  But
+   "SHA-3 not supported" is fine, because the reason the first word is
+   capitalized is not because it is at the beginning of the sentence,
+   but because the word would be spelled in capital letters even when
+   it appeared in the middle of the sentence.
 
  - Say what the error is first ("cannot open %s", not "%s: cannot open")
+
+
+Externally Visible Names
+
+ - For configuration variable names, follow the existing convention:
+
+   . The section name indicates the affected subsystem.
+
+   . The subsection name, if any, indicates which of an unbounded set
+     of things to set the value for.
+
+   . The variable name describes the effect of tweaking this knob.
+
+   The section and variable names that consist of multiple words are
+   formed by concatenating the words without punctuations (e.g. `-`),
+   and are broken using bumpyCaps in documentation as a hint to the
+   reader.
+
+   When choosing the variable namespace, do not use variable name for
+   specifying possibly unbounded set of things, most notably anything
+   an end user can freely come up with (e.g. branch names).  Instead,
+   use subsection names or variable values, like the existing variable
+   branch.<name>.description does.
 
 
 Writing Documentation:
@@ -441,6 +564,10 @@ Writing Documentation:
    --sort=<key>
    --abbrev[=<n>]
 
+ If a placeholder has multiple words, they are separated by dashes:
+   <new-branch-name>
+   --template=<template-directory>
+
  Possibility of multiple occurrences is indicated by three dots:
    <file>...
    (One or more of <file>.)
@@ -457,12 +584,12 @@ Writing Documentation:
    (Zero or more of <patch>.  Note that the dots are inside, not
    outside the brackets.)
 
- Multiple alternatives are indicated with vertical bar:
+ Multiple alternatives are indicated with vertical bars:
    [-q | --quiet]
    [--utf8 | --no-utf8]
 
  Parentheses are used for grouping:
-   [(<rev>|<range>)...]
+   [(<rev> | <range>)...]
    (Any number of either <rev> or <range>.  Parens are needed to make
    it clear that "..." pertains to both <rev> and <range>.)
 
@@ -489,12 +616,23 @@ Writing Documentation:
  modifying paragraphs or option/command explanations that contain options
  or commands:
 
- Literal examples (e.g. use of command-line options, command names, and
- configuration variables) are typeset in monospace, and if you can use
- `backticks around word phrases`, do so.
+ Literal examples (e.g. use of command-line options, command names,
+ branch names, URLs, pathnames (files and directories), configuration and
+ environment variables) must be typeset in monospace (i.e. wrapped with
+ backticks):
    `--pretty=oneline`
    `git rev-list`
-   `remote.pushdefault`
+   `remote.pushDefault`
+   `http://git.example.com`
+   `.git/config`
+   `GIT_DIR`
+   `HEAD`
+
+ An environment variable must be prefixed with "$" only when referring to its
+ value and not when referring to the variable itself, in this case there is
+ nothing to add except the backticks:
+   `GIT_DIR` is specified
+   `$GIT_DIR/hooks/pre-receive`
 
  Word phrases enclosed in `backtick characters` are rendered literally
  and will not be further expanded. The use of `backticks` to achieve the

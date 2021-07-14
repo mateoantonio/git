@@ -8,6 +8,9 @@ test_description='git submodule sync
 These tests exercise the "git submodule sync" subcommand.
 '
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 test_expect_success setup '
@@ -62,13 +65,13 @@ test_expect_success 'change submodule' '
 '
 
 reset_submodule_urls () {
-	local root
-	root=$(pwd) &&
 	(
+		root=$(pwd) &&
 		cd super-clone/submodule &&
 		git config remote.origin.url "$root/submodule"
 	) &&
 	(
+		root=$(pwd) &&
 		cd super-clone/submodule/sub-submodule &&
 		git config remote.origin.url "$root/submodule"
 	)
@@ -78,7 +81,7 @@ test_expect_success 'change submodule url' '
 	(
 		cd super &&
 		cd submodule &&
-		git checkout master &&
+		git checkout main &&
 		git pull
 	) &&
 	mv submodule moved-submodule &&
@@ -112,7 +115,7 @@ test_expect_success '"git submodule sync" should update submodule URLs' '
 	)" &&
 	(
 		cd super-clone/submodule &&
-		git checkout master &&
+		git checkout main &&
 		git pull
 	) &&
 	(
@@ -140,7 +143,7 @@ test_expect_success '"git submodule sync --recursive" should update all submodul
 	)" &&
 	(
 		cd super-clone/submodule/sub-submodule &&
-		git checkout master &&
+		git checkout main &&
 		git pull
 	)
 '
@@ -157,7 +160,7 @@ test_expect_success '"git submodule sync" should update submodule URLs - subdire
 		cd sub &&
 		git submodule sync >../../output
 	) &&
-	grep "\\.\\./submodule" output &&
+	test_i18ngrep "\\.\\./submodule" output &&
 	test -d "$(
 		cd super-clone/submodule &&
 		git config remote.origin.url
@@ -168,7 +171,7 @@ test_expect_success '"git submodule sync" should update submodule URLs - subdire
 	)" &&
 	(
 		cd super-clone/submodule &&
-		git checkout master &&
+		git checkout main &&
 		git pull
 	) &&
 	(
@@ -188,7 +191,7 @@ test_expect_success '"git submodule sync --recursive" should update all submodul
 		cd sub &&
 		git submodule sync --recursive >../../output
 	) &&
-	grep "\\.\\./submodule/sub-submodule" output &&
+	test_i18ngrep "\\.\\./submodule/sub-submodule" output &&
 	test -d "$(
 		cd super-clone/submodule &&
 		git config remote.origin.url
@@ -199,7 +202,7 @@ test_expect_success '"git submodule sync --recursive" should update all submodul
 	)" &&
 	(
 		cd super-clone/submodule/sub-submodule &&
-		git checkout master &&
+		git checkout main &&
 		git pull
 	)
 '

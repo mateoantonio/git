@@ -4,6 +4,7 @@
 #
 # - override the commit message with $FAKE_COMMIT_MESSAGE
 # - amend the commit message with $FAKE_COMMIT_AMEND
+# - copy the original commit message to a file with $FAKE_MESSAGE_COPY
 # - check that non-commit messages have a certain line count with $EXPECT_COUNT
 # - check the commit count in the commit message header with $EXPECT_HEADER_COUNT
 # - rewrite a rebase -i script as directed by $FAKE_LINES.
@@ -14,10 +15,11 @@
 #       specified line.
 #
 #   "<cmd> <lineno>" -- add a line with the specified command
-#       ("squash", "fixup", "edit", or "reword") and the SHA1 taken
-#       from the specified line.
+#       ("pick", "squash", "fixup"|"fixup_-C"|"fixup_-c", "edit", "reword" or "drop")
+#       and the SHA1 taken from the specified line.
 #
-#   "exec_cmd_with_args" -- add an "exec cmd with args" line.
+#   "_" -- add a space, like "fixup_-C" implies "fixup -C" and
+#       "exec_cmd_with_args" add an "exec cmd with args" line.
 #
 #   "#" -- Add a comment line.
 #
@@ -32,6 +34,7 @@ set_fake_editor () {
 			exit
 		test -z "$FAKE_COMMIT_MESSAGE" || echo "$FAKE_COMMIT_MESSAGE" > "$1"
 		test -z "$FAKE_COMMIT_AMEND" || echo "$FAKE_COMMIT_AMEND" >> "$1"
+		test -z "$FAKE_MESSAGE_COPY" || cat "$1" >"$FAKE_MESSAGE_COPY"
 		exit
 		;;
 	esac
@@ -43,20 +46,28 @@ set_fake_editor () {
 	rm -f "$1"
 	echo 'rebase -i script before editing:'
 	cat "$1".tmp
-	action=pick
+	action=\&
 	for line in $FAKE_LINES; do
 		case $line in
-		squash|fixup|edit|reword)
+		pick|p|squash|s|fixup|f|edit|e|reword|r|drop|d|label|l|reset|r|merge|m)
 			action="$line";;
-		exec*)
+		exec_*|x_*|break|b)
 			echo "$line" | sed 's/_/ /g' >> "$1";;
+		merge_*|fixup_*)
+			action=$(echo "$line" | sed 's/_/ /g');;
 		"#")
 			echo '# comment' >> "$1";;
 		">")
 			echo >> "$1";;
-		*)
-			sed -n "${line}s/^pick/$action/p" < "$1".tmp >> "$1"
+		bad)
+			action="badcmd";;
+		fakesha)
+			test \& != "$action" || action=pick
+			echo "$action XXXXXXX False commit" >> "$1"
 			action=pick;;
+		*)
+			sed -n "${line}s/^[a-z][a-z]*/$action/p" < "$1".tmp >> "$1"
+			action=\&;;
 		esac
 	done
 	echo 'rebase -i script after editing:'
@@ -111,4 +122,32 @@ revert () {
 make_empty () {
 	git commit --allow-empty -m "$1" &&
 	git tag "$1"
+}
+
+# Call this (inside test_expect_success) at the end of a test file to
+# check that no tests have changed editor related environment
+# variables or config settings
+test_editor_unchanged () {
+	# We're only interested in exported variables hence 'sh -c'
+	sh -c 'cat >actual <<-EOF
+	EDITOR=$EDITOR
+	FAKE_COMMIT_AMEND=$FAKE_COMMIT_AMEND
+	FAKE_COMMIT_MESSAGE=$FAKE_COMMIT_MESSAGE
+	FAKE_LINES=$FAKE_LINES
+	GIT_EDITOR=$GIT_EDITOR
+	GIT_SEQUENCE_EDITOR=$GIT_SEQUENCE_EDITOR
+	core.editor=$(git config core.editor)
+	sequence.editor=$(git config sequence.editor)
+	EOF'
+	cat >expect <<-\EOF
+	EDITOR=:
+	FAKE_COMMIT_AMEND=
+	FAKE_COMMIT_MESSAGE=
+	FAKE_LINES=
+	GIT_EDITOR=
+	GIT_SEQUENCE_EDITOR=
+	core.editor=
+	sequence.editor=
+	EOF
+	test_cmp expect actual
 }

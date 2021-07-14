@@ -5,6 +5,9 @@ test_description='git-cvsserver and git refspecs
 tests ability for git-cvsserver to switch between and compare
 tags, branches and other git refspecs'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 #########
@@ -82,11 +85,11 @@ perl -e 'use DBI; use DBD::SQLite' >/dev/null 2>&1 || {
 }
 
 unset GIT_DIR GIT_CONFIG
-WORKDIR=$(pwd)
-SERVERDIR=$(pwd)/gitcvs.git
+WORKDIR=$PWD
+SERVERDIR=$PWD/gitcvs.git
 git_config="$SERVERDIR/config"
 CVSROOT=":fork:$SERVERDIR"
-CVSWORK="$(pwd)/cvswork"
+CVSWORK="$PWD/cvswork"
 CVS_SERVER=git-cvsserver
 export CVSROOT CVS_SERVER
 
@@ -115,7 +118,7 @@ test_expect_success 'setup v1, b1' '
 
 rm -rf cvswork
 test_expect_success 'cvs co v1' '
-	cvs -f -Q co -r v1 -d cvswork master >cvs.log 2>&1 &&
+	cvs -f -Q co -r v1 -d cvswork main >cvs.log 2>&1 &&
 	check_start_tree cvswork &&
 	check_file cvswork textfile.c v1 &&
 	check_file cvswork t2 v1 &&
@@ -128,7 +131,7 @@ test_expect_success 'cvs co v1' '
 
 rm -rf cvswork
 test_expect_success 'cvs co b1' '
-	cvs -f co -r b1 -d cvswork master >cvs.log 2>&1 &&
+	cvs -f co -r b1 -d cvswork main >cvs.log 2>&1 &&
 	check_start_tree cvswork &&
 	check_file cvswork textfile.c v1 &&
 	check_file cvswork t2 v1 &&
@@ -140,7 +143,7 @@ test_expect_success 'cvs co b1' '
 '
 
 test_expect_success 'cvs co b1 [cvswork3]' '
-	cvs -f co -r b1 -d cvswork3 master >cvs.log 2>&1 &&
+	cvs -f co -r b1 -d cvswork3 main >cvs.log 2>&1 &&
 	check_start_tree cvswork3 &&
 	check_file cvswork3 textfile.c v1 &&
 	check_file cvswork3 t2 v1 &&
@@ -178,7 +181,7 @@ test_expect_success 'setup v1.2 on b1' '
 	mkdir cdir &&
 	echo "cdir/cfile" >cdir/cfile &&
 	git add -A cdir adir t3 t2 &&
-	git commit -q -m 'v1.2' &&
+	git commit -q -m "v1.2" &&
 	git tag v1.2 &&
 	git push --tags gitcvs.git b1:b1
 '
@@ -265,7 +268,7 @@ test_expect_success 'setup simple b2' '
 '
 
 test_expect_success 'cvs co b2 [into cvswork2]' '
-	cvs -f co -r b2 -d cvswork2 master >cvs.log 2>&1 &&
+	cvs -f co -r b2 -d cvswork2 main >cvs.log 2>&1 &&
 	check_start_tree cvswork &&
 	check_file cvswork textfile.c v1 &&
 	check_file cvswork t2 v1 &&
@@ -455,20 +458,20 @@ test_expect_success 'cvs up -r $(git rev-parse v1)' '
 '
 
 test_expect_success 'cvs diff -r v1 -u' '
-	( cd cvswork && cvs -f diff -r v1 -u ) >cvsDiff.out 2>cvs.log &&
+	( cd cvswork && cvs -f diff -r v1 -u >../cvsDiff.out 2>../cvs.log ) &&
 	test_must_be_empty cvsDiff.out &&
 	test_must_be_empty cvs.log
 '
 
 test_expect_success 'cvs diff -N -r v2 -u' '
-	( cd cvswork && ! cvs -f diff -N -r v2 -u ) >cvsDiff.out 2>cvs.log &&
+	( cd cvswork && ! cvs -f diff -N -r v2 -u >../cvsDiff.out 2>../cvs.log ) &&
 	test_must_be_empty cvs.log &&
 	test -s cvsDiff.out &&
 	check_diff cvsDiff.out v2 v1 >check_diff.out 2>&1
 '
 
 test_expect_success 'cvs diff -N -r v2 -r v1.2' '
-	( cd cvswork && ! cvs -f diff -N -r v2 -r v1.2 -u ) >cvsDiff.out 2>cvs.log &&
+	( cd cvswork && ! cvs -f diff -N -r v2 -r v1.2 -u >../cvsDiff.out 2>../cvs.log ) &&
 	test_must_be_empty cvs.log &&
 	test -s cvsDiff.out &&
 	check_diff cvsDiff.out v2 v1.2 >check_diff.out 2>&1
@@ -487,7 +490,7 @@ test_expect_success 'apply early [cvswork3] diff to b3' '
 '
 
 test_expect_success 'check [cvswork3] diff' '
-	( cd cvswork3 && ! cvs -f diff -N -u ) >"$WORKDIR/cvsDiff.out" 2>cvs.log &&
+	( cd cvswork3 && ! cvs -f diff -N -u >"$WORKDIR/cvsDiff.out" 2>../cvs.log ) &&
 	test_must_be_empty cvs.log &&
 	test -s cvsDiff.out &&
 	test $(grep Index: cvsDiff.out | wc -l) = 3 &&
@@ -496,7 +499,7 @@ test_expect_success 'check [cvswork3] diff' '
 '
 
 test_expect_success 'merge early [cvswork3] b3 with b1' '
-	( cd gitwork3 && git merge "message" HEAD b1 ) &&
+	( cd gitwork3 && git merge -m "message" b1 ) &&
 	git fetch gitwork3 b3:b3 &&
 	git tag v3merged b3 &&
 	git push --tags gitcvs.git b3:b3

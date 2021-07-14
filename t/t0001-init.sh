@@ -12,6 +12,13 @@ check_config () {
 		echo "expected a directory $1, a file $1/config and $1/refs"
 		return 1
 	fi
+
+	if test_have_prereq POSIXPERM && test -x "$1/config"
+	then
+		echo "$1/config is executable?"
+		return 1
+	fi
+
 	bare=$(cd "$1" && git config --bool core.bare)
 	worktree=$(cd "$1" && git config core.worktree) ||
 	worktree=unset
@@ -80,6 +87,22 @@ test_expect_success 'plain nested in bare through aliased command' '
 	check_config bare-ancestor-aliased.git/plain-nested/.git false unset
 '
 
+test_expect_success 'No extra GIT_* on alias scripts' '
+	write_script script <<-\EOF &&
+	env |
+		sed -n \
+			-e "/^GIT_PREFIX=/d" \
+			-e "/^GIT_TEXTDOMAINDIR=/d" \
+			-e "/^GIT_TRACE2_PARENT/d" \
+			-e "/^GIT_/s/=.*//p" |
+		sort
+	EOF
+	./script >expected &&
+	git config alias.script \!./script &&
+	( mkdir sub && cd sub && git script >../actual ) &&
+	test_cmp expected actual
+'
+
 test_expect_success 'plain with GIT_WORK_TREE' '
 	mkdir plain-wt &&
 	test_must_fail env GIT_WORK_TREE="$(pwd)/plain-wt" git init plain-wt
@@ -140,20 +163,19 @@ test_expect_success 'reinit' '
 	(
 		mkdir again &&
 		cd again &&
-		git init >out1 2>err1 &&
+		git -c init.defaultBranch=initial init >out1 2>err1 &&
 		git init >out2 2>err2
 	) &&
 	test_i18ngrep "Initialized empty" again/out1 &&
 	test_i18ngrep "Reinitialized existing" again/out2 &&
-	>again/empty &&
-	test_i18ncmp again/empty again/err1 &&
-	test_i18ncmp again/empty again/err2
+	test_must_be_empty again/err1 &&
+	test_must_be_empty again/err2
 '
 
 test_expect_success 'init with --template' '
 	mkdir template-source &&
 	echo content >template-source/file &&
-	git init --template=../template-source template-custom &&
+	git init --template=template-source template-custom &&
 	test_cmp template-source/file template-custom/.git/file
 '
 
@@ -164,19 +186,31 @@ test_expect_success 'init with --template (blank)' '
 	test_path_is_missing template-blank/.git/info/exclude
 '
 
+init_no_templatedir_env () {
+	(
+		sane_unset GIT_TEMPLATE_DIR &&
+		NO_SET_GIT_TEMPLATE_DIR=t &&
+		export NO_SET_GIT_TEMPLATE_DIR &&
+		git init "$1"
+	)
+}
+
 test_expect_success 'init with init.templatedir set' '
 	mkdir templatedir-source &&
 	echo Content >templatedir-source/file &&
 	test_config_global init.templatedir "${HOME}/templatedir-source" &&
-	(
-		mkdir templatedir-set &&
-		cd templatedir-set &&
-		sane_unset GIT_TEMPLATE_DIR &&
-		NO_SET_GIT_TEMPLATE_DIR=t &&
-		export NO_SET_GIT_TEMPLATE_DIR &&
-		git init
-	) &&
+
+	init_no_templatedir_env templatedir-set &&
 	test_cmp templatedir-source/file templatedir-set/.git/file
+'
+
+test_expect_success 'init with init.templatedir using ~ expansion' '
+	mkdir -p templatedir-source &&
+	echo Content >templatedir-source/file &&
+	test_config_global init.templatedir "~/templatedir-source" &&
+
+	init_no_templatedir_env templatedir-expansion &&
+	test_cmp templatedir-source/file templatedir-expansion/.git/file
 '
 
 test_expect_success 'init --bare/--shared overrides system/global config' '
@@ -195,8 +229,8 @@ test_expect_success 'init honors global core.sharedRepository' '
 	x$(git config -f shared-honor-global/.git/config core.sharedRepository)
 '
 
-test_expect_success 'init rejects insanely long --template' '
-	test_must_fail git init --template=$(printf "x%09999dx" 1) test
+test_expect_success 'init allows insanely long --template' '
+	git init --template=$(printf "x%09999dx" 1) test
 '
 
 test_expect_success 'init creates a new directory' '
@@ -236,6 +270,9 @@ test_expect_success POSIXPERM 'init creates a new deep directory (umask vs. shar
 	(
 		# Leading directories should honor umask while
 		# the repository itself should follow "shared"
+		mkdir newdir &&
+		# Remove a default ACL if possible.
+		(setfacl -k newdir 2>/dev/null || true) &&
 		umask 002 &&
 		git init --bare --shared=0660 newdir/a/b/c &&
 		test_path_is_dir newdir/a/b/c/refs &&
@@ -262,6 +299,7 @@ test_expect_success 'init notices EEXIST (2)' '
 '
 
 test_expect_success POSIXPERM,SANITY 'init notices EPERM' '
+	test_when_finished "chmod +w newdir" &&
 	rm -fr newdir &&
 	mkdir newdir &&
 	chmod -w newdir &&
@@ -285,9 +323,71 @@ test_expect_success 'init prefers command line to GIT_DIR' '
 test_expect_success 'init with separate gitdir' '
 	rm -rf newdir &&
 	git init --separate-git-dir realgitdir newdir &&
-	echo "gitdir: $(pwd)/realgitdir" >expected &&
-	test_cmp expected newdir/.git &&
+	newdir_git="$(cat newdir/.git)" &&
+	test_cmp_fspath "$(pwd)/realgitdir" "${newdir_git#gitdir: }" &&
 	test_path_is_dir realgitdir/refs
+'
+
+test_expect_success 'explicit bare & --separate-git-dir incompatible' '
+	test_must_fail git init --bare --separate-git-dir goop.git bare.git 2>err &&
+	test_i18ngrep "mutually exclusive" err
+'
+
+test_expect_success 'implicit bare & --separate-git-dir incompatible' '
+	test_when_finished "rm -rf bare.git" &&
+	mkdir -p bare.git &&
+	test_must_fail env GIT_DIR=. \
+		git -C bare.git init --separate-git-dir goop.git 2>err &&
+	test_i18ngrep "incompatible" err
+'
+
+test_expect_success 'bare & --separate-git-dir incompatible within worktree' '
+	test_when_finished "rm -rf bare.git linkwt seprepo" &&
+	test_commit gumby &&
+	git clone --bare . bare.git &&
+	git -C bare.git worktree add --detach ../linkwt &&
+	test_must_fail git -C linkwt init --separate-git-dir seprepo 2>err &&
+	test_i18ngrep "incompatible" err
+'
+
+test_lazy_prereq GETCWD_IGNORES_PERMS '
+	base=GETCWD_TEST_BASE_DIR &&
+	mkdir -p $base/dir &&
+	chmod 100 $base ||
+	BUG "cannot prepare $base"
+
+	(cd $base/dir && /bin/pwd -P)
+	status=$?
+
+	chmod 700 $base &&
+	rm -rf $base ||
+	BUG "cannot clean $base"
+	return $status
+'
+
+check_long_base_path () {
+	# exceed initial buffer size of strbuf_getcwd()
+	component=123456789abcdef &&
+	test_when_finished "chmod 0700 $component; rm -rf $component" &&
+	p31=$component/$component &&
+	p127=$p31/$p31/$p31/$p31 &&
+	mkdir -p $p127 &&
+	if test $# = 1
+	then
+		chmod $1 $component
+	fi &&
+	(
+		cd $p127 &&
+		git init newdir
+	)
+}
+
+test_expect_success 'init in long base path' '
+	check_long_base_path
+'
+
+test_expect_success GETCWD_IGNORES_PERMS 'init in long restricted base path' '
+	check_long_base_path 0111
 '
 
 test_expect_success 're-init on .git file' '
@@ -295,12 +395,9 @@ test_expect_success 're-init on .git file' '
 '
 
 test_expect_success 're-init to update git link' '
-	(
-	cd newdir &&
-	git init --separate-git-dir ../surrealgitdir
-	) &&
-	echo "gitdir: $(pwd)/surrealgitdir" >expected &&
-	test_cmp expected newdir/.git &&
+	git -C newdir init --separate-git-dir ../surrealgitdir &&
+	newdir_git="$(cat newdir/.git)" &&
+	test_cmp_fspath "$(pwd)/surrealgitdir" "${newdir_git#gitdir: }" &&
 	test_path_is_dir surrealgitdir/refs &&
 	test_path_is_missing realgitdir/refs
 '
@@ -308,12 +405,9 @@ test_expect_success 're-init to update git link' '
 test_expect_success 're-init to move gitdir' '
 	rm -rf newdir realgitdir surrealgitdir &&
 	git init newdir &&
-	(
-	cd newdir &&
-	git init --separate-git-dir ../realgitdir
-	) &&
-	echo "gitdir: $(pwd)/realgitdir" >expected &&
-	test_cmp expected newdir/.git &&
+	git -C newdir init --separate-git-dir ../realgitdir &&
+	newdir_git="$(cat newdir/.git)" &&
+	test_cmp_fspath "$(pwd)/realgitdir" "${newdir_git#gitdir: }" &&
 	test_path_is_dir realgitdir/refs
 '
 
@@ -330,6 +424,178 @@ test_expect_success SYMLINKS 're-init to move gitdir symlink' '
 	test_cmp expected newdir/.git &&
 	test_cmp expected newdir/here &&
 	test_path_is_dir realgitdir/refs
+'
+
+sep_git_dir_worktree ()  {
+	test_when_finished "rm -rf mainwt linkwt seprepo" &&
+	git init mainwt &&
+	test_commit -C mainwt gumby &&
+	git -C mainwt worktree add --detach ../linkwt &&
+	git -C "$1" init --separate-git-dir ../seprepo &&
+	git -C mainwt rev-parse --git-common-dir >expect &&
+	git -C linkwt rev-parse --git-common-dir >actual &&
+	test_cmp expect actual
+}
+
+test_expect_success 're-init to move gitdir with linked worktrees' '
+	sep_git_dir_worktree mainwt
+'
+
+test_expect_success 're-init to move gitdir within linked worktree' '
+	sep_git_dir_worktree linkwt
+'
+
+test_expect_success MINGW '.git hidden' '
+	rm -rf newdir &&
+	(
+		sane_unset GIT_DIR GIT_WORK_TREE &&
+		mkdir newdir &&
+		cd newdir &&
+		git init &&
+		test_path_is_hidden .git
+	) &&
+	check_config newdir/.git false unset
+'
+
+test_expect_success MINGW 'bare git dir not hidden' '
+	rm -rf newdir &&
+	(
+		sane_unset GIT_DIR GIT_WORK_TREE GIT_CONFIG &&
+		mkdir newdir &&
+		cd newdir &&
+		git --bare init
+	) &&
+	! is_hidden newdir
+'
+
+test_expect_success 'remote init from does not use config from cwd' '
+	rm -rf newdir &&
+	test_config core.logallrefupdates true &&
+	git init newdir &&
+	echo true >expect &&
+	git -C newdir config --bool core.logallrefupdates >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 're-init from a linked worktree' '
+	git init main-worktree &&
+	(
+		cd main-worktree &&
+		test_commit first &&
+		git worktree add ../linked-worktree &&
+		mv .git/info/exclude expected-exclude &&
+		cp .git/config expected-config &&
+		find .git/worktrees -print | sort >expected &&
+		git -C ../linked-worktree init &&
+		test_cmp expected-exclude .git/info/exclude &&
+		test_cmp expected-config .git/config &&
+		find .git/worktrees -print | sort >actual &&
+		test_cmp expected actual
+	)
+'
+
+test_expect_success 'init honors GIT_DEFAULT_HASH' '
+	GIT_DEFAULT_HASH=sha1 git init sha1 &&
+	git -C sha1 rev-parse --show-object-format >actual &&
+	echo sha1 >expected &&
+	test_cmp expected actual &&
+	GIT_DEFAULT_HASH=sha256 git init sha256 &&
+	git -C sha256 rev-parse --show-object-format >actual &&
+	echo sha256 >expected &&
+	test_cmp expected actual
+'
+
+test_expect_success 'init honors --object-format' '
+	git init --object-format=sha1 explicit-sha1 &&
+	git -C explicit-sha1 rev-parse --show-object-format >actual &&
+	echo sha1 >expected &&
+	test_cmp expected actual &&
+	git init --object-format=sha256 explicit-sha256 &&
+	git -C explicit-sha256 rev-parse --show-object-format >actual &&
+	echo sha256 >expected &&
+	test_cmp expected actual
+'
+
+test_expect_success 'extensions.objectFormat is not allowed with repo version 0' '
+	git init --object-format=sha256 explicit-v0 &&
+	git -C explicit-v0 config core.repositoryformatversion 0 &&
+	test_must_fail git -C explicit-v0 rev-parse --show-object-format
+'
+
+test_expect_success 'init rejects attempts to initialize with different hash' '
+	test_must_fail git -C sha1 init --object-format=sha256 &&
+	test_must_fail git -C sha256 init --object-format=sha1
+'
+
+test_expect_success MINGW 'core.hidedotfiles = false' '
+	git config --global core.hidedotfiles false &&
+	rm -rf newdir &&
+	mkdir newdir &&
+	(
+		sane_unset GIT_DIR GIT_WORK_TREE GIT_CONFIG &&
+		git -C newdir init
+	) &&
+	! is_hidden newdir/.git
+'
+
+test_expect_success MINGW 'redirect std handles' '
+	GIT_REDIRECT_STDOUT=output.txt git rev-parse --git-dir &&
+	test .git = "$(cat output.txt)" &&
+	test -z "$(GIT_REDIRECT_STDOUT=off git rev-parse --git-dir)" &&
+	test_must_fail env \
+		GIT_REDIRECT_STDOUT=output.txt \
+		GIT_REDIRECT_STDERR="2>&1" \
+		git rev-parse --git-dir --verify refs/invalid &&
+	grep "^\\.git\$" output.txt &&
+	grep "Needed a single revision" output.txt
+'
+
+test_expect_success '--initial-branch' '
+	git init --initial-branch=hello initial-branch-option &&
+	git -C initial-branch-option symbolic-ref HEAD >actual &&
+	echo refs/heads/hello >expect &&
+	test_cmp expect actual &&
+
+	: re-initializing should not change the branch name &&
+	git init --initial-branch=ignore initial-branch-option 2>err &&
+	test_i18ngrep "ignored --initial-branch" err &&
+	git -C initial-branch-option symbolic-ref HEAD >actual &&
+	grep hello actual
+'
+
+test_expect_success 'overridden default initial branch name (config)' '
+	test_config_global init.defaultBranch nmb &&
+	GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME= git init initial-branch-config &&
+	git -C initial-branch-config symbolic-ref HEAD >actual &&
+	grep nmb actual
+'
+
+test_expect_success 'advice on unconfigured init.defaultBranch' '
+	GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME= git -c color.advice=always \
+		init unconfigured-default-branch-name 2>err &&
+	test_decode_color <err >decoded &&
+	test_i18ngrep "<YELLOW>hint: " decoded
+'
+
+test_expect_success 'overridden default main branch name (env)' '
+	test_config_global init.defaultBranch nmb &&
+	GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=env git init main-branch-env &&
+	git -C main-branch-env symbolic-ref HEAD >actual &&
+	grep env actual
+'
+
+test_expect_success 'invalid default branch name' '
+	test_must_fail env GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME="with space" \
+		git init initial-branch-invalid 2>err &&
+	test_i18ngrep "invalid branch name" err
+'
+
+test_expect_success 'branch -m with the initial branch' '
+	git init rename-initial &&
+	git -C rename-initial branch -m renamed &&
+	test renamed = $(git -C rename-initial symbolic-ref --short HEAD) &&
+	git -C rename-initial branch -m renamed again &&
+	test again = $(git -C rename-initial symbolic-ref --short HEAD)
 '
 
 test_done

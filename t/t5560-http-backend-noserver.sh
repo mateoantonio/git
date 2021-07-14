@@ -1,6 +1,9 @@
 #!/bin/sh
 
 test_description='test git-http-backend-noserver'
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 HTTPD_DOCUMENT_ROOT_PATH="$TRASH_DIRECTORY"
@@ -42,10 +45,6 @@ POST() {
 	fi
 	printf "Status: $3\r\n" >exp &&
 	test_cmp exp act
-}
-
-log_div() {
-	return 0
 }
 
 . "$TEST_DIRECTORY"/t556x_common

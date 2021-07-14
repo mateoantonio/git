@@ -1,6 +1,9 @@
 #!/bin/sh
 
 test_description='check pre-push hooks'
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 # Setup hook that always succeeds
@@ -48,11 +51,11 @@ EOF
 cat >expected <<EOF
 parent1
 repo1
-refs/heads/master $COMMIT2 refs/heads/foreign $COMMIT1
+refs/heads/main $COMMIT2 refs/heads/foreign $COMMIT1
 EOF
 
 test_expect_success 'push with hook' '
-	git push parent1 master:foreign &&
+	git push parent1 main:foreign &&
 	diff expected actual
 '
 
@@ -78,8 +81,8 @@ test_expect_success 'push to default' '
 cat >expected <<EOF
 parent1
 repo1
-refs/tags/one $COMMIT1 refs/tags/tag1 $_z40
-HEAD~ $COMMIT2 refs/heads/prev $_z40
+refs/tags/one $COMMIT1 refs/tags/tag1 $ZERO_OID
+HEAD~ $COMMIT2 refs/heads/prev $ZERO_OID
 EOF
 
 test_expect_success 'push non-branches' '
@@ -90,7 +93,7 @@ test_expect_success 'push non-branches' '
 cat >expected <<EOF
 parent1
 repo1
-(delete) $_z40 refs/heads/prev $COMMIT2
+(delete) $ZERO_OID refs/heads/prev $COMMIT2
 EOF
 
 test_expect_success 'push delete' '
@@ -101,7 +104,7 @@ test_expect_success 'push delete' '
 cat >expected <<EOF
 repo1
 repo1
-HEAD $COMMIT3 refs/heads/other $_z40
+HEAD $COMMIT3 refs/heads/other $ZERO_OID
 EOF
 
 test_expect_success 'push to URL' '
@@ -109,23 +112,20 @@ test_expect_success 'push to URL' '
 	diff expected actual
 '
 
-# Test that filling pipe buffers doesn't cause failure
-# Too slow to leave enabled for general use
-if false
-then
-	printf 'parent1\nrepo1\n' >expected
-	nr=1000
-	while test $nr -lt 2000
-	do
-		nr=$(( $nr + 1 ))
-		git branch b/$nr $COMMIT3
-		echo "refs/heads/b/$nr $COMMIT3 refs/heads/b/$nr $_z40" >>expected
-	done
+test_expect_success 'set up many-ref tests' '
+	{
+		nr=1000
+		while test $nr -lt 2000
+		do
+			nr=$(( $nr + 1 ))
+			echo "create refs/heads/b/$nr $COMMIT3"
+		done
+	} | git update-ref --stdin
+'
 
-	test_expect_success 'push many refs' '
-		git push parent1 "refs/heads/b/*:refs/heads/b/*" &&
-		diff expected actual
-	'
-fi
+test_expect_success 'sigpipe does not cause pre-push hook failure' '
+	echo "exit 0" | write_script "$HOOK" &&
+	git push parent1 "refs/heads/b/*:refs/heads/b/*"
+'
 
 test_done

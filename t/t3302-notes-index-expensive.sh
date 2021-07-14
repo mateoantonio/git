@@ -5,9 +5,10 @@
 
 test_description='Test commit notes index (expensive!)'
 
-. ./test-lib.sh
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-test -n "$GIT_NOTES_TIMING_TESTS" && test_set_prereq EXPENSIVE
+. ./test-lib.sh
 
 create_repo () {
 	number_of_commits=$1
@@ -22,7 +23,7 @@ create_repo () {
 			notemark=$(($mark+1))
 			test_tick &&
 			cat <<-INPUT_END &&
-			commit refs/heads/master
+			commit refs/heads/main
 			mark :$mark
 			committer $GIT_COMMITTER_NAME <$GIT_COMMITTER_EMAIL> $GIT_COMMITTER_DATE
 			data <<COMMIT

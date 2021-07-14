@@ -13,6 +13,7 @@ P1='pathname	with HT'
 P2='pathname with SP'
 P3='pathname
 with LF'
+test_have_prereq !MINGW &&
 echo 2>/dev/null >"$P1" && test -f "$P1" && rm -f "$P1" || {
 	skip_all='Your filesystem does not allow tabs in filenames'
 	test_done
@@ -81,7 +82,7 @@ test_expect_success 'git diff --stat -M HEAD' '
 	 7 files changed, 0 insertions(+), 0 deletions(-)
 	EOF
 	git diff --stat -M HEAD >actual &&
-	test_i18ncmp expect actual
+	test_cmp expect actual
 '
 
 test_done

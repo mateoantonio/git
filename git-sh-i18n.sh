@@ -23,9 +23,6 @@ then
 elif test -n "$GIT_INTERNAL_GETTEXT_TEST_FALLBACKS"
 then
 	: no probing necessary
-elif test -n "$GIT_GETTEXT_POISON"
-then
-	GIT_INTERNAL_GETTEXT_SH_SCHEME=poison
 elif type gettext.sh >/dev/null 2>&1
 then
 	# GNU libintl's gettext.sh
@@ -53,16 +50,12 @@ gettext_without_eval_gettext)
 			git sh-i18n--envsubst "$1"
 		)
 	}
-	;;
-poison)
-	# Emit garbage so that tests that incorrectly rely on translatable
-	# strings will fail.
-	gettext () {
-		printf "%s" "# GETTEXT POISON #"
-	}
 
-	eval_gettext () {
-		printf "%s" "# GETTEXT POISON #"
+	eval_ngettext () {
+		ngettext "$1" "$2" "$3" | (
+			export PATH $(git sh-i18n--envsubst --variables "$2");
+			git sh-i18n--envsubst "$2"
+		)
 	}
 	;;
 *)
@@ -74,6 +67,13 @@ poison)
 		printf "%s" "$1" | (
 			export PATH $(git sh-i18n--envsubst --variables "$1");
 			git sh-i18n--envsubst "$1"
+		)
+	}
+
+	eval_ngettext () {
+		(test "$3" = 1 && printf "%s" "$1" || printf "%s" "$2") | (
+			export PATH $(git sh-i18n--envsubst --variables "$2");
+			git sh-i18n--envsubst "$2"
 		)
 	}
 	;;

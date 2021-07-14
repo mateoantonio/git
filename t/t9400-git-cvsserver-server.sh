@@ -8,6 +8,9 @@ test_description='git-cvsserver access
 tests read access to a git repository with the
 cvs CLI client via git-cvsserver server'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 if ! test_have_prereq PERL; then
@@ -25,11 +28,11 @@ perl -e 'use DBI; use DBD::SQLite' >/dev/null 2>&1 || {
     test_done
 }
 
-WORKDIR=$(pwd)
-SERVERDIR=$(pwd)/gitcvs.git
+WORKDIR=$PWD
+SERVERDIR=$PWD/gitcvs.git
 git_config="$SERVERDIR/config"
 CVSROOT=":fork:$SERVERDIR"
-CVSWORK="$(pwd)/cvswork"
+CVSWORK="$PWD/cvswork"
 CVS_SERVER=git-cvsserver
 export CVSROOT CVS_SERVER
 
@@ -45,7 +48,8 @@ test_expect_success 'setup' '
   touch secondrootfile &&
   git add secondrootfile &&
   git commit -m "second root") &&
-  git pull secondroot master &&
+  git fetch secondroot main &&
+  git merge --allow-unrelated-histories FETCH_HEAD &&
   git clone -q --bare "$WORKDIR/.git" "$SERVERDIR" >/dev/null 2>&1 &&
   GIT_DIR="$SERVERDIR" git config --bool gitcvs.enabled true &&
   GIT_DIR="$SERVERDIR" git config gitcvs.logfile "$SERVERDIR/gitcvs.log" &&
@@ -56,7 +60,7 @@ test_expect_success 'setup' '
 # note that cvs doesn't accept absolute pathnames
 # as argument to co -d
 test_expect_success 'basic checkout' \
-  'GIT_CONFIG="$git_config" cvs -Q co -d cvswork master &&
+  'GIT_CONFIG="$git_config" cvs -Q co -d cvswork main &&
    test "$(echo $(grep -v ^D cvswork/CVS/Entries|cut -d/ -f2,3,5 | head -n 1))" = "empty/1.1/" &&
    test "$(echo $(grep -v ^D cvswork/CVS/Entries|cut -d/ -f2,3,5 | sed -ne \$p))" = "secondrootfile/1.1/"'
 
@@ -225,7 +229,7 @@ GIT_DIR="$SERVERDIR" git config --bool gitcvs.enabled true || exit 1
 
 test_expect_success 'gitcvs.enabled = false' \
   'GIT_DIR="$SERVERDIR" git config --bool gitcvs.enabled false &&
-   if GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 master >cvs.log 2>&1
+   if GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 main >cvs.log 2>&1
    then
      echo unexpected cvs success
      false
@@ -239,14 +243,14 @@ rm -fr cvswork2
 test_expect_success 'gitcvs.ext.enabled = true' \
   'GIT_DIR="$SERVERDIR" git config --bool gitcvs.ext.enabled true &&
    GIT_DIR="$SERVERDIR" git config --bool gitcvs.enabled false &&
-   GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 master >cvs.log 2>&1 &&
+   GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 main >cvs.log 2>&1 &&
    test_cmp cvswork cvswork2'
 
 rm -fr cvswork2
 test_expect_success 'gitcvs.ext.enabled = false' \
   'GIT_DIR="$SERVERDIR" git config --bool gitcvs.ext.enabled false &&
    GIT_DIR="$SERVERDIR" git config --bool gitcvs.enabled true &&
-   if GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 master >cvs.log 2>&1
+   if GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 main >cvs.log 2>&1
    then
      echo unexpected cvs success
      false
@@ -260,21 +264,21 @@ rm -fr cvswork2
 test_expect_success 'gitcvs.dbname' \
   'GIT_DIR="$SERVERDIR" git config --bool gitcvs.ext.enabled true &&
    GIT_DIR="$SERVERDIR" git config gitcvs.dbname %Ggitcvs.%a.%m.sqlite &&
-   GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 master >cvs.log 2>&1 &&
+   GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 main >cvs.log 2>&1 &&
    test_cmp cvswork cvswork2 &&
-   test -f "$SERVERDIR/gitcvs.ext.master.sqlite" &&
-   cmp "$SERVERDIR/gitcvs.master.sqlite" "$SERVERDIR/gitcvs.ext.master.sqlite"'
+   test -f "$SERVERDIR/gitcvs.ext.main.sqlite" &&
+   cmp "$SERVERDIR/gitcvs.main.sqlite" "$SERVERDIR/gitcvs.ext.main.sqlite"'
 
 rm -fr cvswork2
 test_expect_success 'gitcvs.ext.dbname' \
   'GIT_DIR="$SERVERDIR" git config --bool gitcvs.ext.enabled true &&
    GIT_DIR="$SERVERDIR" git config gitcvs.ext.dbname %Ggitcvs1.%a.%m.sqlite &&
    GIT_DIR="$SERVERDIR" git config gitcvs.dbname %Ggitcvs2.%a.%m.sqlite &&
-   GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 master >cvs.log 2>&1 &&
+   GIT_CONFIG="$git_config" cvs -Q co -d cvswork2 main >cvs.log 2>&1 &&
    test_cmp cvswork cvswork2 &&
-   test -f "$SERVERDIR/gitcvs1.ext.master.sqlite" &&
-   test ! -f "$SERVERDIR/gitcvs2.ext.master.sqlite" &&
-   cmp "$SERVERDIR/gitcvs.master.sqlite" "$SERVERDIR/gitcvs1.ext.master.sqlite"'
+   test -f "$SERVERDIR/gitcvs1.ext.main.sqlite" &&
+   test ! -f "$SERVERDIR/gitcvs2.ext.main.sqlite" &&
+   cmp "$SERVERDIR/gitcvs.main.sqlite" "$SERVERDIR/gitcvs1.ext.main.sqlite"'
 
 
 #------------
@@ -327,7 +331,7 @@ test_expect_success 'cvs update (subdirectories)' \
   '(for dir in A A/B A/B/C A/D E; do
       mkdir $dir &&
       echo "test file in $dir" >"$dir/file_in_$(echo $dir|sed -e "s#/# #g")"  &&
-      git add $dir;
+      git add $dir
    done) &&
    git commit -q -m "deep sub directory structure" &&
    git push gitcvs.git >/dev/null &&
@@ -370,7 +374,7 @@ test_expect_success 'cvs update (merge)' \
   'echo Line 0 >expected &&
    for i in 1 2 3 4 5 6 7
    do
-     echo Line $i >>merge
+     echo Line $i >>merge &&
      echo Line $i >>expected
    done &&
    echo Line 8 >>expected &&
@@ -381,7 +385,7 @@ test_expect_success 'cvs update (merge)' \
    GIT_CONFIG="$git_config" cvs -Q update &&
    test "$(echo $(grep merge CVS/Entries|cut -d/ -f2,3,5))" = "merge/1.1/" &&
    test_cmp merge ../merge &&
-   ( echo Line 0; cat merge ) >merge.tmp &&
+   ( echo Line 0 && cat merge ) >merge.tmp &&
    mv merge.tmp merge &&
    cd "$WORKDIR" &&
    echo Line 8 >>merge &&
@@ -409,7 +413,7 @@ do
 done
 
 test_expect_success 'cvs update (conflict merge)' \
-  '( echo LINE 0; cat merge ) >merge.tmp &&
+  '( echo LINE 0 && cat merge ) >merge.tmp &&
    mv merge.tmp merge &&
    git add merge &&
    git commit -q -m "Merge test (conflict)" &&
@@ -446,19 +450,17 @@ test_expect_success 'cvs update (-p)' '
     git push gitcvs.git >/dev/null &&
     cd cvswork &&
     GIT_CONFIG="$git_config" cvs update &&
-    rm -f failures &&
     for i in merge no-lf empty really-empty; do
-        GIT_CONFIG="$git_config" cvs update -p "$i" >$i.out
-	test_cmp $i.out ../$i >>failures 2>&1
-    done &&
-    test -z "$(cat failures)"
+	GIT_CONFIG="$git_config" cvs update -p "$i" >$i.out &&
+	test_cmp $i.out ../$i || return 1
+    done
 '
 
 cd "$WORKDIR"
 test_expect_success 'cvs update (module list supports packed refs)' '
     GIT_DIR="$SERVERDIR" git pack-refs --all &&
     GIT_CONFIG="$git_config" cvs -n up -d 2> out &&
-    grep "cvs update: New directory \`master'\''" < out
+    grep "cvs update: New directory \`main'\''" < out
 '
 
 #------------
@@ -500,8 +502,8 @@ test_expect_success 'cvs status (no subdirs in header)' '
 cd "$WORKDIR"
 test_expect_success 'cvs co -c (shows module database)' '
     GIT_CONFIG="$git_config" cvs co -c > out &&
-    grep "^master[	 ][ 	]*master$" <out &&
-    ! grep -v "^master[	 ][ 	]*master$" <out
+    grep "^main[	 ][ 	]*main$" <out &&
+    ! grep -v "^main[	 ][ 	]*main$" <out
 '
 
 #------------
@@ -527,7 +529,7 @@ test_expect_success 'cvs co -c (shows module database)' '
 
 sed -e 's/^x//' -e 's/SP$/ /' > "$WORKDIR/expect" <<EOF
 x
-xRCS file: $WORKDIR/gitcvs.git/master/merge,v
+xRCS file: $WORKDIR/gitcvs.git/main/merge,v
 xWorking file: merge
 xhead: 1.4
 xbranch:
@@ -585,6 +587,54 @@ test_expect_success 'cvs annotate' '
     sed -e "s/ .*//" ../out >../actual &&
     for i in 3 1 1 1 1 1 1 1 2 4; do echo 1.$i; done >../expect &&
     test_cmp ../expect ../actual
+'
+
+#------------
+# running via git-shell
+#------------
+
+cd "$WORKDIR"
+
+test_expect_success 'create remote-cvs helper' '
+	write_script remote-cvs <<-\EOF
+	exec git shell -c "cvs server"
+	EOF
+'
+
+test_expect_success 'cvs server does not run with vanilla git-shell' '
+	(
+		cd cvswork &&
+		CVS_SERVER=$WORKDIR/remote-cvs &&
+		export CVS_SERVER &&
+		! cvs log merge
+	)
+'
+
+test_expect_success 'configure git shell to run cvs server' '
+	mkdir "$HOME"/git-shell-commands &&
+
+	write_script "$HOME"/git-shell-commands/cvs <<-\EOF &&
+	if ! test $# = 1 && test "$1" = "server"
+	then
+		echo >&2 "git-cvsserver only handles \"server\""
+		exit 1
+	fi
+	exec git cvsserver server
+	EOF
+
+	# Should not be used, but part of the recommended setup
+	write_script "$HOME"/git-shell-commands/no-interactive-login <<-\EOF
+	echo Interactive login forbidden
+	EOF
+'
+
+test_expect_success 'cvs server can run with recommended config' '
+	(
+		cd cvswork &&
+		CVS_SERVER=$WORKDIR/remote-cvs &&
+		export CVS_SERVER &&
+		cvs log merge
+	)
 '
 
 test_done

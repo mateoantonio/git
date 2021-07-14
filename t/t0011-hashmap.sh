@@ -4,19 +4,10 @@ test_description='test hashmap and string hash functions'
 . ./test-lib.sh
 
 test_hashmap() {
-	echo "$1" | test-hashmap $3 > actual &&
+	echo "$1" | test-tool hashmap $3 > actual &&
 	echo "$2" > expect &&
 	test_cmp expect actual
 }
-
-test_expect_success 'hash functions' '
-
-test_hashmap "hash key1" "2215982743 2215982743 116372151 116372151" &&
-test_hashmap "hash key2" "2215982740 2215982740 116372148 116372148" &&
-test_hashmap "hash fooBarFrotz" "1383912807 1383912807 3189766727 3189766727" &&
-test_hashmap "hash foobarfrotz" "2862305959 2862305959 3189766727 3189766727"
-
-'
 
 test_expect_success 'put' '
 
@@ -179,31 +170,45 @@ NULL
 '
 
 test_expect_success 'iterate' '
+	test-tool hashmap >actual.raw <<-\EOF &&
+	put key1 value1
+	put key2 value2
+	put fooBarFrotz value3
+	iterate
+	EOF
 
-test_hashmap "put key1 value1
-put key2 value2
-put fooBarFrotz value3
-iterate" "NULL
-NULL
-NULL
-key2 value2
-key1 value1
-fooBarFrotz value3"
+	cat >expect <<-\EOF &&
+	NULL
+	NULL
+	NULL
+	fooBarFrotz value3
+	key1 value1
+	key2 value2
+	EOF
 
+	sort <actual.raw >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'iterate (case insensitive)' '
+	test-tool hashmap ignorecase >actual.raw <<-\EOF &&
+	put key1 value1
+	put key2 value2
+	put fooBarFrotz value3
+	iterate
+	EOF
 
-test_hashmap "put key1 value1
-put key2 value2
-put fooBarFrotz value3
-iterate" "NULL
-NULL
-NULL
-fooBarFrotz value3
-key2 value2
-key1 value1" ignorecase
+	cat >expect <<-\EOF &&
+	NULL
+	NULL
+	NULL
+	fooBarFrotz value3
+	key1 value1
+	key2 value2
+	EOF
 
+	sort <actual.raw >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'grow / shrink' '
@@ -218,7 +223,7 @@ test_expect_success 'grow / shrink' '
 	echo size >> in &&
 	echo 64 51 >> expect &&
 	echo put key52 value52 >> in &&
-	echo NULL >> expect
+	echo NULL >> expect &&
 	echo size >> in &&
 	echo 256 52 >> expect &&
 	for n in $(test_seq 12)
@@ -232,8 +237,21 @@ test_expect_success 'grow / shrink' '
 	echo value40 >> expect &&
 	echo size >> in &&
 	echo 64 39 >> expect &&
-	cat in | test-hashmap > out &&
+	cat in | test-tool hashmap > out &&
 	test_cmp expect out
+
+'
+
+test_expect_success 'string interning' '
+
+test_hashmap "intern value1
+intern Value1
+intern value2
+intern value2
+" "value1
+Value1
+value2
+value2"
 
 '
 

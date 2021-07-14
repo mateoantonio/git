@@ -1,6 +1,7 @@
 #include "cache.h"
 #include "string-list.h"
 #include "mailmap.h"
+#include "object-store.h"
 
 #define DEBUG_MAILMAP 0
 #if DEBUG_MAILMAP
@@ -71,31 +72,26 @@ static void add_mapping(struct string_list *map,
 			char *old_name, char *old_email)
 {
 	struct mailmap_entry *me;
-	int index;
+	struct string_list_item *item;
 
 	if (old_email == NULL) {
 		old_email = new_email;
 		new_email = NULL;
 	}
 
-	if ((index = string_list_find_insert_index(map, old_email, 1)) < 0) {
-		/* mailmap entry exists, invert index value */
-		index = -1 - index;
-		me = (struct mailmap_entry *)map->items[index].util;
+	item = string_list_insert(map, old_email);
+	if (item->util) {
+		me = (struct mailmap_entry *)item->util;
 	} else {
-		/* create mailmap entry */
-		struct string_list_item *item;
-
-		item = string_list_insert_at_index(map, index, old_email);
-		me = xcalloc(1, sizeof(struct mailmap_entry));
+		CALLOC_ARRAY(me, 1);
 		me->namemap.strdup_strings = 1;
 		me->namemap.cmp = namemap_cmp;
 		item->util = me;
 	}
 
 	if (old_name == NULL) {
-		debug_mm("mailmap: adding (simple) entry for %s at index %d\n",
-			 old_email, index);
+		debug_mm("mailmap: adding (simple) entry for '%s'\n", old_email);
+
 		/* Replace current name and new email for simple entry */
 		if (new_name) {
 			free(me->name);
@@ -107,12 +103,9 @@ static void add_mapping(struct string_list *map,
 		}
 	} else {
 		struct mailmap_info *mi = xcalloc(1, sizeof(struct mailmap_info));
-		debug_mm("mailmap: adding (complex) entry for %s at index %d\n",
-			 old_email, index);
-		if (new_name)
-			mi->name = xstrdup(new_name);
-		if (new_email)
-			mi->email = xstrdup(new_email);
+		debug_mm("mailmap: adding (complex) entry for '%s'\n", old_email);
+		mi->name = xstrdup_or_null(new_name);
+		mi->email = xstrdup_or_null(new_email);
 		string_list_insert(&me->namemap, old_name)->util = mi;
 	}
 
@@ -150,32 +143,13 @@ static char *parse_name_and_email(char *buffer, char **name,
 	return (*right == '\0' ? NULL : right);
 }
 
-static void read_mailmap_line(struct string_list *map, char *buffer,
-			      char **repo_abbrev)
+static void read_mailmap_line(struct string_list *map, char *buffer)
 {
 	char *name1 = NULL, *email1 = NULL, *name2 = NULL, *email2 = NULL;
-	if (buffer[0] == '#') {
-		static const char abbrev[] = "# repo-abbrev:";
-		int abblen = sizeof(abbrev) - 1;
-		int len = strlen(buffer);
 
-		if (!repo_abbrev)
-			return;
-
-		if (len && buffer[len - 1] == '\n')
-			buffer[--len] = 0;
-		if (!strncmp(buffer, abbrev, abblen)) {
-			char *cp;
-
-			free(*repo_abbrev);
-			*repo_abbrev = xmalloc(len);
-
-			for (cp = buffer + abblen; isspace(*cp); cp++)
-				; /* nothing */
-			strcpy(*repo_abbrev, cp);
-		}
+	if (buffer[0] == '#')
 		return;
-	}
+
 	if ((name2 = parse_name_and_email(buffer, &name1, &email1, 0)) != NULL)
 		parse_name_and_email(name2, &name2, &email2, 1);
 
@@ -183,31 +157,38 @@ static void read_mailmap_line(struct string_list *map, char *buffer,
 		add_mapping(map, name1, email1, name2, email2);
 }
 
+/* Flags for read_mailmap_file() */
+#define MAILMAP_NOFOLLOW (1<<0)
+
 static int read_mailmap_file(struct string_list *map, const char *filename,
-			     char **repo_abbrev)
+			     unsigned flags)
 {
 	char buffer[1024];
 	FILE *f;
+	int fd;
 
 	if (!filename)
 		return 0;
 
-	f = fopen(filename, "r");
-	if (!f) {
+	if (flags & MAILMAP_NOFOLLOW)
+		fd = open_nofollow(filename, O_RDONLY);
+	else
+		fd = open(filename, O_RDONLY);
+
+	if (fd < 0) {
 		if (errno == ENOENT)
 			return 0;
-		return error("unable to open mailmap at %s: %s",
-			     filename, strerror(errno));
+		return error_errno("unable to open mailmap at %s", filename);
 	}
+	f = xfdopen(fd, "r");
 
 	while (fgets(buffer, sizeof(buffer), f) != NULL)
-		read_mailmap_line(map, buffer, repo_abbrev);
+		read_mailmap_line(map, buffer);
 	fclose(f);
 	return 0;
 }
 
-static void read_mailmap_string(struct string_list *map, char *buf,
-				char **repo_abbrev)
+static void read_mailmap_string(struct string_list *map, char *buf)
 {
 	while (*buf) {
 		char *end = strchrnul(buf, '\n');
@@ -215,38 +196,36 @@ static void read_mailmap_string(struct string_list *map, char *buf,
 		if (*end)
 			*end++ = '\0';
 
-		read_mailmap_line(map, buf, repo_abbrev);
+		read_mailmap_line(map, buf);
 		buf = end;
 	}
 }
 
-static int read_mailmap_blob(struct string_list *map,
-			     const char *name,
-			     char **repo_abbrev)
+static int read_mailmap_blob(struct string_list *map, const char *name)
 {
-	unsigned char sha1[20];
+	struct object_id oid;
 	char *buf;
 	unsigned long size;
 	enum object_type type;
 
 	if (!name)
 		return 0;
-	if (get_sha1(name, sha1) < 0)
+	if (get_oid(name, &oid) < 0)
 		return 0;
 
-	buf = read_sha1_file(sha1, &type, &size);
+	buf = read_object_file(&oid, &type, &size);
 	if (!buf)
 		return error("unable to read mailmap object at %s", name);
 	if (type != OBJ_BLOB)
 		return error("mailmap is not a blob: %s", name);
 
-	read_mailmap_string(map, buf, repo_abbrev);
+	read_mailmap_string(map, buf);
 
 	free(buf);
 	return 0;
 }
 
-int read_mailmap(struct string_list *map, char **repo_abbrev)
+int read_mailmap(struct string_list *map)
 {
 	int err = 0;
 
@@ -256,9 +235,13 @@ int read_mailmap(struct string_list *map, char **repo_abbrev)
 	if (!git_mailmap_blob && is_bare_repository())
 		git_mailmap_blob = "HEAD:.mailmap";
 
-	err |= read_mailmap_file(map, ".mailmap", repo_abbrev);
-	err |= read_mailmap_blob(map, git_mailmap_blob, repo_abbrev);
-	err |= read_mailmap_file(map, git_mailmap_file, repo_abbrev);
+	if (!startup_info->have_repository || !is_bare_repository())
+		err |= read_mailmap_file(map, ".mailmap",
+					 startup_info->have_repository ?
+					 MAILMAP_NOFOLLOW : 0);
+	if (startup_info->have_repository)
+		err |= read_mailmap_blob(map, git_mailmap_blob);
+	err |= read_mailmap_file(map, git_mailmap_file, 0);
 	return err;
 }
 

@@ -2,13 +2,10 @@
 
 test_description='push from/to a shallow clone over http'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
-
-if test -n "$NO_CURL"; then
-	say 'skipping test, git built without http support'
-	test_done
-fi
-
 . "$TEST_DIRECTORY"/lib-httpd.sh
 start_httpd
 
@@ -57,12 +54,12 @@ test_expect_success 'push to shallow repo via http' '
 	(
 	cd full &&
 	commit 9 &&
-	git push $HTTPD_URL/smart/repo.git +master:refs/remotes/top/master
+	git push $HTTPD_URL/smart/repo.git +main:refs/remotes/top/main
 	) &&
 	(
 	cd "$HTTPD_DOCUMENT_ROOT_PATH/repo.git" &&
 	git fsck &&
-	git log --format=%s top/master >actual &&
+	git log --format=%s top/main >actual &&
 	cat <<EOF >expect &&
 9
 4
@@ -80,11 +77,11 @@ test_expect_success 'push from shallow repo via http' '
 	git config http.receivepack true
 	) &&
 	commit 10 &&
-	git push $HTTPD_URL/smart/repo.git +master:refs/remotes/top/master &&
+	git push $HTTPD_URL/smart/repo.git +main:refs/remotes/top/main &&
 	(
 	cd "$HTTPD_DOCUMENT_ROOT_PATH/repo.git" &&
 	git fsck &&
-	git log --format=%s top/master >actual &&
+	git log --format=%s top/main >actual &&
 	cat <<EOF >expect &&
 10
 4
@@ -96,5 +93,4 @@ EOF
 	)
 '
 
-stop_httpd
 test_done

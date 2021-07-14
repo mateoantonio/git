@@ -1,6 +1,17 @@
 # This file isn't used as a test script directly, instead it is
 # sourced from t8001-annotate.sh and t8002-blame.sh.
 
+if test_have_prereq MINGW
+then
+  sanitize_L () {
+	echo "$1" | sed 'sX\(^-L\|,\)\^\?/X&\\;*Xg'
+  }
+else
+  sanitize_L () {
+	echo "$1"
+  }
+fi
+
 check_count () {
 	head= &&
 	file='file' &&
@@ -10,6 +21,7 @@ check_count () {
 		case "$1" in
 		-h) head="$2"; shift; shift ;;
 		-f) file="$2"; shift; shift ;;
+		-L*) options="$options $(sanitize_L "$1")"; shift ;;
 		-*) options="$options $1"; shift ;;
 		*) break ;;
 		esac
@@ -56,6 +68,21 @@ test_expect_success 'blame 1 author' '
 	check_count A 2
 '
 
+test_expect_success 'blame in a bare repo without starting commit' '
+	git clone --bare . bare.git &&
+	(
+		cd bare.git &&
+		check_count A 2
+	)
+'
+
+test_expect_success 'blame by tag objects' '
+	git tag -m "test tag" testTag &&
+	git tag -m "test tag #2" testTag2 testTag &&
+	check_count -h testTag A 2 &&
+	check_count -h testTag2 A 2
+'
+
 test_expect_success 'setup B lines' '
 	echo "2A quick brown fox jumps over the" >>file &&
 	echo "lazy dog" >>file &&
@@ -68,7 +95,7 @@ test_expect_success 'blame 2 authors' '
 '
 
 test_expect_success 'setup B1 lines (branch1)' '
-	git checkout -b branch1 master &&
+	git checkout -b branch1 main &&
 	echo "3A slow green fox jumps into the" >>file &&
 	echo "well." >>file &&
 	GIT_AUTHOR_NAME="B1" GIT_AUTHOR_EMAIL="B1@test.git" \
@@ -80,7 +107,7 @@ test_expect_success 'blame 2 authors + 1 branch1 author' '
 '
 
 test_expect_success 'setup B2 lines (branch2)' '
-	git checkout -b branch2 master &&
+	git checkout -b branch2 main &&
 	sed -e "s/2A quick brown/4A quick brown lazy dog/" <file >file.new &&
 	mv file.new file &&
 	GIT_AUTHOR_NAME="B2" GIT_AUTHOR_EMAIL="B2@test.git" \
@@ -99,12 +126,16 @@ test_expect_success 'blame 2 authors + 2 merged-in authors' '
 	check_count A 2 B 1 B1 2 B2 1
 '
 
+test_expect_success 'blame --first-parent blames merge for branch1' '
+	check_count --first-parent A 2 B 1 "A U Thor" 2 B2 1
+'
+
 test_expect_success 'blame ancestor' '
-	check_count -h master A 2 B 2
+	check_count -h main A 2 B 2
 '
 
 test_expect_success 'blame great-ancestor' '
-	check_count -h master^ A 2
+	check_count -h main^ A 2
 '
 
 test_expect_success 'setup evil merge' '
@@ -297,11 +328,11 @@ test_expect_success 'blame -L ,Y (Y == nlines)' '
 
 test_expect_success 'blame -L ,Y (Y == nlines + 1)' '
 	n=$(expr $(wc -l <file) + 2) &&
-	test_must_fail $PROG -L,$n file
+	check_count -L,$n A 1 B 1 B1 1 B2 1 "A U Thor" 1 C 1 D 1 E 1
 '
 
 test_expect_success 'blame -L ,Y (Y > nlines)' '
-	test_must_fail $PROG -L,12345 file
+	check_count -L,12345 A 1 B 1 B1 1 B2 1 "A U Thor" 1 C 1 D 1 E 1
 '
 
 test_expect_success 'blame -L multiple (disjoint)' '
@@ -393,7 +424,7 @@ test_expect_success 'setup -L :regex' '
 	mv hello.c hello.orig &&
 	echo "#include <stdio.h>" >hello.c &&
 	cat hello.orig >>hello.c &&
-	tr Q "\\t" >>hello.c <<-\EOF
+	tr Q "\\t" >>hello.c <<-\EOF &&
 	void mail()
 	{
 	Qputs("mail");
@@ -446,6 +477,28 @@ test_expect_success 'blame -L ^:RE (absolute: not found)' '
 test_expect_success 'blame -L ^:RE (absolute: end-of-file)' '
 	n=$(printf "%d" $(wc -l <hello.c)) &&
 	check_count -f hello.c -L$n -L^:ma.. F 4 G 1 H 1
+'
+
+test_expect_success 'blame -L :funcname with userdiff driver' '
+	cat >file.template <<-\EOF &&
+	DO NOT MATCH THIS LINE
+	function RIGHT(a, b) result(c)
+	AS THE DEFAULT DRIVER WOULD
+
+	integer, intent(in) :: ChangeMe
+	EOF
+
+	fortran_file=file.f03 &&
+	test_when_finished "rm .gitattributes" &&
+	echo "$fortran_file diff=fortran" >.gitattributes &&
+
+	test_commit --author "A <A@test.git>" \
+		"add" "$fortran_file" \
+		"$(cat file.template)" &&
+	test_commit --author "B <B@test.git>" \
+		"change" "$fortran_file" \
+		"$(cat file.template | sed -e s/ChangeMe/IWasChanged/)" &&
+	check_count -f "$fortran_file" -L:RIGHT A 3 B 1
 '
 
 test_expect_success 'setup incremental' '
